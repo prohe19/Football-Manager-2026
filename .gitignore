@@ -1,0 +1,20 @@
+# .NET build output
+bin/
+obj/
+*.user
+
+# BepInEx runtime / dumps (machine-specific, never commit)
+BepInEx/
+interop/
+dump.cs
+global-metadata.dat
+GameAssembly.dll
+
+# IDE
+.vs/
+.idea/
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db

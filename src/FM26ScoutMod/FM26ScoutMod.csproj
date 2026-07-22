@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    FM26 Scout Mod — BepInEx 6 (IL2CPP) plugin.
+
+    FM26 runs on Unity 6 + IL2CPP, so this targets BepInEx 6 IL2CPP.
+    Build on your PC with:  dotnet build -c Release
+    Output:                 bin/Release/net6.0/FM26ScoutMod.dll  → copy to <game>/BepInEx/plugins/
+
+    NOTE: I can't compile this in the dev sandbox. If NuGet restore fails, the
+    surest path is to generate a fresh project from the official BepInEx template
+    and paste in Plugin.cs (see docs/setup-bepinex.md), then send me any errors.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>FM26ScoutMod</AssemblyName>
+    <Product>FM26 Scout Mod</Product>
+    <Version>0.1.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- BepInEx packages live on the BepInEx NuGet feed, not just nuget.org -->
+    <RestoreAdditionalProjectSources>
+      https://api.nuget.org/v3/index.json;
+      https://nuget.bepinex.dev/v3/index.json
+    </RestoreAdditionalProjectSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core BepInEx 6 IL2CPP runtime. Compile-time only; the loader provides it at runtime. -->
+    <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.*" IncludeAssets="compile" />
+  </ItemGroup>
+
+</Project>
