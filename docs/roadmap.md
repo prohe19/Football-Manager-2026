@@ -10,12 +10,14 @@ Each stage is a commit (or set of commits) in this repo.
 
 **Goal:** Prove BepInEx can load our code inside FM26 on your machine.
 
-- [ ] Install BepInEx 6 (IL2CPP) into the FM26 folder — see [setup-bepinex.md](setup-bepinex.md)
-- [ ] Launch FM26, confirm the **BepInEx console window** appears
+- [x] Install BepInEx 6 (IL2CPP) into the FM26 folder — see [setup-bepinex.md](setup-bepinex.md) — **BepInEx 6.0.0-be.738 confirmed**
+- [x] Launch FM26, confirm the **BepInEx console window** appears — **confirmed; interop assemblies generated (Unity 6000.0.52f1, .NET 6.0.7)**
 - [ ] Build our Stage 0 plugin (`src/FM26ScoutMod`) and drop it in `BepInEx/plugins`
 - [ ] See our log line in the console: `== FM26 Scout Mod: Stage 0 injection successful ==`
 
 ✅ **Done when:** our plugin's message prints in the BepInEx console.
+
+> Confirmed runtime details captured in [environment.md](environment.md).
 
 ---
 
