@@ -6,17 +6,13 @@
     FM26 runs on Unity 6 + IL2CPP, so this targets BepInEx 6 IL2CPP.
     Build on your PC with:  dotnet build -c Release
     Output:                 bin/Release/net6.0/FM26ScoutMod.dll  → copy to <game>/BepInEx/plugins/
-
-    NOTE: I can't compile this in the dev sandbox. If NuGet restore fails, the
-    surest path is to generate a fresh project from the official BepInEx template
-    and paste in Plugin.cs (see docs/setup-bepinex.md), then send me any errors.
   -->
 
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>FM26ScoutMod</AssemblyName>
     <Product>FM26 Scout Mod</Product>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -25,11 +21,42 @@
       https://api.nuget.org/v3/index.json;
       https://nuget.bepinex.dev/v3/index.json
     </RestoreAdditionalProjectSources>
+
+    <!--
+      Path to your FM26 install. If your game lives somewhere else, change this ONE line.
+      The interop assemblies BepInEx generates live under <GameDir>\BepInEx\interop.
+    -->
+    <GameDir>D:\SteamLibrary\steamapps\common\Football Manager 26</GameDir>
+    <InteropDir>$(GameDir)\BepInEx\interop</InteropDir>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Core BepInEx 6 IL2CPP runtime. Compile-time only; the loader provides it at runtime. -->
+    <!-- Core BepInEx 6 IL2CPP runtime (provides BasePlugin + Il2CppInterop.Runtime). -->
     <PackageReference Include="BepInEx.Unity.IL2CPP" Version="6.0.0-be.*" IncludeAssets="compile" />
+  </ItemGroup>
+
+  <!--
+    Game / Unity interop assemblies, referenced from your local BepInEx\interop folder.
+    Compile-time only (Private=false) — BepInEx already loads these at runtime, so we
+    must NOT copy them into our output.
+  -->
+  <ItemGroup>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(InteropDir)\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>$(InteropDir)\Il2CppSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(InteropDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(InteropDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
 </Project>
