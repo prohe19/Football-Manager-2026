@@ -6,22 +6,20 @@ Each stage is a commit (or set of commits) in this repo.
 
 ---
 
-## Stage 0 — Injection works ⬅️ **we are here**
+## Stage 0 — Injection works ✅ **COMPLETE**
 
 **Goal:** Prove BepInEx can load our code inside FM26 on your machine.
 
 - [x] Install BepInEx 6 (IL2CPP) into the FM26 folder — see [setup-bepinex.md](setup-bepinex.md) — **BepInEx 6.0.0-be.738 confirmed**
 - [x] Launch FM26, confirm the **BepInEx console window** appears — **confirmed; interop assemblies generated (Unity 6000.0.52f1, .NET 6.0.7)**
-- [ ] Build our Stage 0 plugin (`src/FM26ScoutMod`) and drop it in `BepInEx/plugins`
-- [ ] See our log line in the console: `== FM26 Scout Mod: Stage 0 injection successful ==`
+- [x] Build our Stage 0 plugin (`src/FM26ScoutMod`) and drop it in `BepInEx/plugins` — **built with .NET SDK 10 → net6.0**
+- [x] See our log line in the console: `== FM26 Scout Mod: Stage 0 injection successful ==` — **✅ confirmed printing in-game**
 
-✅ **Done when:** our plugin's message prints in the BepInEx console.
-
-> Confirmed runtime details captured in [environment.md](environment.md).
+✅ **DONE** — our code runs inside FM26. Confirmed runtime details in [environment.md](environment.md).
 
 ---
 
-## Stage 1 — UI inside the game
+## Stage 1 — UI inside the game ⬅️ **we are here**
 
 **Goal:** Draw *something* on screen from our mod.
 
