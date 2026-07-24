@@ -19,19 +19,19 @@ Each stage is a commit (or set of commits) in this repo.
 
 ---
 
-## Stage 1 — UI inside the game ⬅️ **we are here**
+## Stage 1 — UI inside the game ✅ **COMPLETE**
 
 **Goal:** Draw *something* on screen from our mod.
 
-- [ ] Render a small floating **button** over the game
-- [ ] Clicking it **expands** an (empty) panel
-- [ ] Panel can be opened/closed without crashing the game
+- [x] Render a small floating **button** over the game — **"Scout" button, top-left**
+- [x] Clicking it **expands** an (empty) panel — **confirmed in-game (main menu)**
+- [x] Panel can be opened/closed without crashing the game — **IMGUI overlay via injected MonoBehaviour**
 
-✅ **Done when:** you can toggle our panel in-game.
+✅ **DONE** — our own UI renders inside FM26 (game v26.3.2). Toggle works.
 
 ---
 
-## Stage 2 — Touch real game data (the risky one)
+## Stage 2 — Touch real game data (the risky one) ⬅️ **we are here**
 
 **Goal:** Read actual data out of the game's own objects.
 

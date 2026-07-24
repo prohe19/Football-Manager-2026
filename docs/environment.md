@@ -10,6 +10,7 @@ These pin down what our plugin must target and where things live.
 | Platform | Steam |
 | Steam App ID | `3551340` |
 | Build ID | `23583635` (content updated Jun 11, 2026) |
+| In-game version | `26.3.2` |
 | Game folder (this machine) | `D:\SteamLibrary\steamapps\common\Football Manager 26\` |
 | Executable | `fm.exe` (BepInEx reports process name `fm`) |
 | Data folder | `fm_Data\` |
