@@ -4,53 +4,52 @@ using FM.UI;
 namespace FM26ScoutMod;
 
 /// <summary>
-/// Stage 2 (step 1) — the property dumper.
+/// Stage 2 (step 1) — the property dumper, with loud diagnostics.
 ///
-/// FM26 stores person data as a property-binding system: each attribute (name, age,
-/// CA, PA, ...) is a numeric PropertyID, and the game can tell us each property's
-/// human-readable name via DbSummaryPersonReference.GetPropertyDescriptionInternal(id).
-///
-/// This panel adds a button that walks the property IDs and logs each one's name to
-/// the BepInEx console, so we can find which IDs are "Current Ability" / "Potential
-/// Ability" — instead of guessing. See docs/findings-data-model.md.
+/// The panel button walks FM26's person property IDs and logs each one's name via
+/// DbSummaryPersonReference.GetPropertyDescriptionInternal, so we can find the CA/PA
+/// IDs. This version logs every step (click, method entry, the count call) so we can
+/// see exactly where things stop if nothing appears. See docs/findings-data-model.md.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
     // IL2CPP-injected MonoBehaviours must expose this IntPtr constructor.
     public ScoutUI(System.IntPtr ptr) : base(ptr) { }
 
-    private bool _open;
-    private string _status = "Load a save, then click Dump.";
+    private bool _open = true;   // start open so the button is obvious
+    private int _clicks;
+    private string _status = "Ready. Click Dump.";
 
     private void OnGUI()
     {
-        if (GUI.Button(new Rect(12, 12, 130, 30), _open ? "Scout  [-]" : "Scout  [+]"))
+        if (GUI.Button(new Rect(12, 12, 140, 30), _open ? "Scout  [-]" : "Scout  [+]"))
             _open = !_open;
 
         if (!_open)
             return;
 
-        GUI.Box(new Rect(12, 48, 340, 200), "FM26 Scout Mod");
-        GUI.Label(new Rect(24, 74, 320, 22), "Stage 2 - reading FM26's data");
-        GUI.Label(new Rect(24, 96, 320, 22), "Step 1: discover the property IDs");
+        GUI.Box(new Rect(12, 48, 380, 210), "FM26 Scout Mod  v" + Plugin.PluginVersion);
+        GUI.Label(new Rect(24, 74, 360, 22), "Stage 2 - reading FM26's data");
 
-        if (GUI.Button(new Rect(24, 122, 316, 28), "Dump person properties -> console"))
+        if (GUI.Button(new Rect(24, 104, 356, 30), "Dump person properties -> console"))
+        {
+            _clicks++;
+            _status = $"Clicked {_clicks}x - dumping...";
+            Plugin.Logger.LogInfo($"[FM26 Scout Mod] >>> Dump button clicked (#{_clicks})");
             DumpPersonProperties();
+        }
 
-        GUI.Label(new Rect(24, 156, 320, 44), _status);
-        GUI.Label(new Rect(24, 222, 320, 22), "v" + Plugin.PluginVersion);
+        GUI.Label(new Rect(24, 142, 360, 90), _status);
     }
 
-    /// <summary>
-    /// Walk property IDs 0..N, and for each one the person schema accepts, log its
-    /// description. This empirically reveals the CA/PA property IDs.
-    /// </summary>
     private void DumpPersonProperties()
     {
+        Plugin.Logger.LogInfo("[FM26 Scout Mod] DumpPersonProperties() entered");
         try
         {
+            Plugin.Logger.LogInfo("[FM26 Scout Mod] calling GetPropertyCountInternal()...");
             int count = DbSummaryPersonReference.GetPropertyCountInternal();
-            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: person property dump (reported count = {count}) =====");
+            Plugin.Logger.LogInfo($"[FM26 Scout Mod] GetPropertyCountInternal() = {count}");
 
             int found = 0;
             for (uint id = 0; id < 4096u; id++)
@@ -63,19 +62,19 @@ public class ScoutUI : MonoBehaviour
 
                 string desc;
                 try { desc = DbSummaryPersonReference.GetPropertyDescriptionInternal(id); }
-                catch { desc = "<error reading description>"; }
+                catch { desc = "<err>"; }
 
                 Plugin.Logger.LogInfo($"  Prop {id} = {desc}");
                 found++;
             }
 
-            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, dumped {found} properties =====");
-            _status = $"Dumped {found} props (count={count}).\nSee BepInEx console.";
+            Plugin.Logger.LogInfo($"[FM26 Scout Mod] done, dumped {found} props (count={count})");
+            _status = $"Clicked {_clicks}x.\nDumped {found} props (count={count}).\nSee console.";
         }
         catch (System.Exception ex)
         {
-            _status = "Error - see console.";
-            Plugin.Logger.LogError($"[FM26 Scout Mod] Property dump failed: {ex}");
+            _status = $"Clicked {_clicks}x.\nERROR: {ex.Message}\n(see console)";
+            Plugin.Logger.LogError($"[FM26 Scout Mod] dump failed: {ex}");
         }
     }
 }
