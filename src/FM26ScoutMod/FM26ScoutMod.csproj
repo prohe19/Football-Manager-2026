@@ -12,7 +12,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>FM26ScoutMod</AssemblyName>
     <Product>FM26 Scout Mod</Product>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <LangVersion>latest</LangVersion>
     <!-- Nullable reference types clash with the IL2CPP interop assemblies (CS0656), so keep off. -->
     <Nullable>disable</Nullable>
@@ -56,6 +56,20 @@
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
       <HintPath>$(InteropDir)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- FM26 game assemblies for the data model (Stage 2). -->
+    <Reference Include="FM.UI">
+      <HintPath>$(InteropDir)\FM.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SI.Interop">
+      <HintPath>$(InteropDir)\SI.Interop.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SI.Bindable.Reference.Core">
+      <HintPath>$(InteropDir)\SI.Bindable.Reference.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
