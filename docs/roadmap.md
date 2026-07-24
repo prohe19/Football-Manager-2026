@@ -35,13 +35,17 @@ Each stage is a commit (or set of commits) in this repo.
 
 **Goal:** Read actual data out of the game's own objects.
 
-- [ ] Dump FM26's assemblies to find the class/field names — see [reverse-engineering.md](reverse-engineering.md)
-- [ ] Locate the "player" object and a list of all players
-- [ ] Print **one real player's name** to the console
+- [x] Dump FM26's assemblies to find the data model — **done via ILSpy**
+- [x] **Understand how data is stored** — property-binding system, see [findings-data-model.md](findings-data-model.md)
+- [ ] Runtime-dump the person **property schema** (find the CA/PA property IDs by name)
+- [ ] Read one person's value for a property (the `SI.Bindable` binding call)
+- [ ] Locate the "all persons" query and print **one real player's name**
 
-✅ **Done when:** our mod prints a real player's name from your save.
+✅ **Done when:** our mod prints a real player's name (and ideally their CA) from your save.
 
-> This is the highest-risk stage. If FM26's data is reachable here, everything after is "just" building features on top.
+> Key insight: FM26 has no `Player.CurrentAbility` field — data is `(ReferenceID, PropertyID) → value`,
+> and property **names are discoverable at runtime** via `GetPropertyDescriptionInternal`. So we let
+> the game tell us the CA/PA IDs instead of guessing. See [findings-data-model.md](findings-data-model.md).
 
 ---
 
