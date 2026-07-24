@@ -53,8 +53,34 @@ We can stop guessing and let the game tell us. The path:
 - `SI.Interop.dll` — `InteropReference` base, `ReferenceID`, `PropertyID`
 - `SI.Bindable.dll`, `SI.Bindable.Reference.Core.dll` — the binding/value system
 
+## Empirical results (v0.3.2 auto-scan, in a loaded save)
+
+Confirmed by calling the methods live from the mod:
+
+- ✅ **The interop bridge works** — `DbSummaryPersonReference.GetPropertyCountInternal()`
+  returned a real value (`3`) from inside the game. We can call FM26's data-layer code.
+- ⚠️ **`DbSummaryPersonReference` is a *thin summary*** — only **3** properties. It is NOT
+  where attributes / CA / PA live. We need a richer reference type.
+- ⚠️ **Property IDs are hashed/large, not sequential** — `AcceptsPropertyInternal(0..4095)`
+  was false for every id, so brute-forcing small numbers finds nothing. Must enumerate the
+  real IDs via `GetProperties(List<PropertyID>)` instead.
+- 🐛 A `NullReferenceException` on `Input[/Mouse/leftButton]` shows up (FM's input system vs
+  our IMGUI). Non-fatal so far; revisit if it causes trouble.
+
+## Next steps (revised)
+
+1. **Enumerate properly** — call `GetProperties(List<PropertyID>)` on an instance to get the
+   real PropertyIDs, then `GetPropertyDescriptionInternal(id)` for each. (Needs the
+   `PropertyID` type — check its shape in ILSpy: field or conversion to `uint`.)
+2. **Find the right reference type** — `DbSummaryPersonReference` is too thin. Look for a
+   richer `Db…Reference` / player-attributes reference that exposes many properties
+   (search `Db` + `Reference` in ILSpy, compare `GetPropertyCountInternal`).
+3. Read a value for (ReferenceID, PropertyID) via the `SI.Bindable` system.
+4. Enumerate all persons/players; then rank by CA / PA / staff role.
+
 ## Open questions (for step 2/3)
 
 - Exact shape of `PropertyID` / `ReferenceID` (how to get/pass the raw uint).
+- Which reference type exposes CA/PA (and the full attribute set).
 - How to read a *typed value* for (ReferenceID, PropertyID) — the binding call.
 - How to get the list of all person ReferenceIDs (the "all players" query).
