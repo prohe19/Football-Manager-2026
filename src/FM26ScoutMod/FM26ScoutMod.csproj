@@ -59,4 +59,17 @@
     </Reference>
   </ItemGroup>
 
+  <!--
+    Auto-deploy: after every successful build, copy our DLL straight into the
+    game's BepInEx\plugins folder. No more manual Copy-Item.
+    (Close FM26 before building — a running game locks the DLL. ContinueOnError
+    keeps the build green if it's locked; just close the game and rebuild.)
+  -->
+  <Target Name="DeployToGame" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(GameDir)\BepInEx\plugins"
+          ContinueOnError="true" />
+    <Message Importance="high" Text="Deployed $(TargetFileName) -> $(GameDir)\BepInEx\plugins" />
+  </Target>
+
 </Project>
