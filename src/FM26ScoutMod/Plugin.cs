@@ -23,7 +23,7 @@ public class Plugin : BasePlugin
     public const string PluginVersion = "0.2.0";
 
     /// <summary>Shared logger so other files can log once we grow past Stage 0.</summary>
-    internal static ManualLogSource Logger = null!;
+    internal static ManualLogSource Logger;
 
     public override void Load()
     {
