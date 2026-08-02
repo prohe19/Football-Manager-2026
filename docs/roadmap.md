@@ -37,11 +37,17 @@ Each stage is a commit (or set of commits) in this repo.
 
 - [x] Dump FM26's assemblies to find the data model — **done via ILSpy**
 - [x] **Understand how data is stored** — property-binding system, see [findings-data-model.md](findings-data-model.md)
-- [ ] Runtime-dump the person **property schema** (find the CA/PA property IDs by name)
+- [x] Runtime-dump the person **property schema** (find the CA/PA property IDs by name) — **✅ all 8,233 properties extracted; CA/PA IDs found, see [property-ids.md](property-ids.md)**
 - [ ] Read one person's value for a property (the `SI.Bindable` binding call)
 - [ ] Locate the "all persons" query and print **one real player's name**
 
 ✅ **Done when:** our mod prints a real player's name (and ideally their CA) from your save.
+
+> **Milestone (build 26.3.2):** the registry dumper worked. We now have the exact PropertyIDs —
+> `PlayerCurrentAbility = 1346584898`, `PlayerPotentialAbility = 1347436866`
+> (staff: `NonPlayerCurrentAbility = 862020186`, `NonPlayerPotentialAbility = 1647325216`),
+> plus every attribute, reputation and identity field. Full map in [property-ids.md](property-ids.md).
+> Remaining work in this stage is *reading a value* for one of these IDs on a real person.
 
 > Key insight: FM26 has no `Player.CurrentAbility` field — data is `(ReferenceID, PropertyID) → value`,
 > and property **names are discoverable at runtime** via `GetPropertyDescriptionInternal`. So we let
