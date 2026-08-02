@@ -76,32 +76,31 @@ public class ScoutUI : MonoBehaviour
                 return;
 
             Plugin.Logger.LogInfo($"===== FM26 Scout Mod: property registry dump ({total}) =====");
-            // Read the NAME from the PropertyIDInfo value (dict[id]) via ToString().
-            // Log the first 60 as a sample (to see what names look like), and flag ANY
-            // entry whose text mentions ability/potential/reputation across all 8233.
+            // Read the real NAME + DisplayName off each PropertyIDInfo (inherited from
+            // IdentifierInfo). Log every entry, and flag ability/potential/reputation.
             int n = 0;
             foreach (uint id in dict.Keys)
             {
-                string name;
+                string name = "", disp = "";
                 try
                 {
                     var info = dict[id];
-                    name = info != null ? info.ToString() : "<null-info>";
+                    if (info != null)
+                    {
+                        name = info.Name ?? "";
+                        disp = info.DisplayName ?? "";
+                    }
                 }
                 catch (System.Exception e) { name = "<err:" + e.Message + ">"; }
 
-                if (n < 60)
-                    Plugin.Logger.LogInfo($"  {id} = {name}");
+                Plugin.Logger.LogInfo($"  {id} = \"{name}\" | \"{disp}\"");
 
-                if (!string.IsNullOrEmpty(name))
-                {
-                    string low = name.ToLowerInvariant();
-                    if (low.Contains("abil") || low.Contains("potential") || low.Contains("reputation"))
-                        Plugin.Logger.LogWarning($"  *** MATCH: {id} = {name} ***");
-                }
+                string blob = (name + " " + disp).ToLowerInvariant();
+                if (blob.Contains("abil") || blob.Contains("potential") || blob.Contains("reputation"))
+                    Plugin.Logger.LogWarning($"  *** MATCH: {id} = \"{name}\" | \"{disp}\" ***");
                 n++;
             }
-            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, scanned {n} properties (logged first 60) =====");
+            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, dumped {n} properties =====");
             _dumped = true;
         }
         catch (System.Exception ex)
