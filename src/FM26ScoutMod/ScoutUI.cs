@@ -76,24 +76,32 @@ public class ScoutUI : MonoBehaviour
                 return;
 
             Plugin.Logger.LogInfo($"===== FM26 Scout Mod: property registry dump ({total}) =====");
+            // Read the NAME from the PropertyIDInfo value (dict[id]) via ToString().
+            // Log the first 60 as a sample (to see what names look like), and flag ANY
+            // entry whose text mentions ability/potential/reputation across all 8233.
             int n = 0;
             foreach (uint id in dict.Keys)
             {
                 string name;
-                try { name = DbSummaryPersonReference.GetPropertyDescriptionInternal(id); }
-                catch { name = "<no desc>"; }
+                try
+                {
+                    var info = dict[id];
+                    name = info != null ? info.ToString() : "<null-info>";
+                }
+                catch (System.Exception e) { name = "<err:" + e.Message + ">"; }
 
-                Plugin.Logger.LogInfo($"  {id} = {name}");
+                if (n < 60)
+                    Plugin.Logger.LogInfo($"  {id} = {name}");
 
                 if (!string.IsNullOrEmpty(name))
                 {
                     string low = name.ToLowerInvariant();
-                    if (low.Contains("abil") || low.Contains("potential") || low.Contains("reputation") || low.Contains("current ab"))
+                    if (low.Contains("abil") || low.Contains("potential") || low.Contains("reputation"))
                         Plugin.Logger.LogWarning($"  *** MATCH: {id} = {name} ***");
                 }
                 n++;
             }
-            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, dumped {n} properties =====");
+            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, scanned {n} properties (logged first 60) =====");
             _dumped = true;
         }
         catch (System.Exception ex)
