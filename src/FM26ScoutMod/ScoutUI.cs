@@ -1,16 +1,21 @@
 using UnityEngine;
 using FM.UI;
+using SI.Bindable.Reference.Core;
 
 namespace FM26ScoutMod;
 
 /// <summary>
-/// Stage 2 (step 1) — the property dumper, now CLICK-FREE.
+/// Stage 2 (step 1) — dump FM26's property registry.
 ///
-/// FM26's own UI eats mouse clicks that land over it, so a button is unreliable.
-/// Instead this auto-scans: every couple of seconds it asks the game for the person
-/// property count, and as soon as that's available (> 0) it dumps every property's
-/// name to the BepInEx console — no clicking required. The panel shows a live
-/// tries/lastCount readout so we always get feedback. See docs/findings-data-model.md.
+/// FM26 registers every bindable property in a global IdentifierSet:
+///   PropertyIdentifierSet.Instance.m_idToInfo : Dictionary&lt;uint, PropertyIDInfo&gt;
+/// This walks that dictionary and logs each property's id + human name (via
+/// DbSummaryPersonReference.GetPropertyDescriptionInternal). Any name that looks
+/// ability/reputation-related is flagged as a warning so it stands out.
+///
+/// Runs automatically (no clicking — FM's UI eats our clicks): it retries every
+/// couple of seconds until the registry is populated, then dumps once.
+/// See docs/findings-data-model.md.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
@@ -25,12 +30,10 @@ public class ScoutUI : MonoBehaviour
 
     private void OnGUI()
     {
-        // Auto-scan — no clicking needed. Retry every 2s until the person schema is
-        // available (count > 0), then dump once.
         if (!_dumped && Time.unscaledTime >= _nextTry)
         {
             _nextTry = Time.unscaledTime + 2f;
-            TryAutoDump();
+            TryDumpRegistry();
         }
 
         if (GUI.Button(new Rect(12, 12, 150, 30), _open ? "Scout  [-]" : "Scout  [+]"))
@@ -38,55 +41,64 @@ public class ScoutUI : MonoBehaviour
         if (!_open)
             return;
 
-        GUI.Box(new Rect(12, 48, 390, 150), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-        GUI.Label(new Rect(24, 74, 370, 22), "Stage 2 - auto-scanning for data");
-
+        GUI.Box(new Rect(12, 48, 400, 150), "FM26 Scout Mod  v" + Plugin.PluginVersion);
+        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - dumping property registry");
         string s = _dumped
-            ? $"DONE - dumped properties (count={_lastCount}).\nSee BepInEx console."
-            : $"Auto-scanning... tries={_tries}, lastCount={_lastCount}";
-        GUI.Label(new Rect(24, 100, 370, 60), s);
-        GUI.Label(new Rect(24, 168, 370, 22), "(no clicking needed - watch the console)");
+            ? $"DONE - registry had {_lastCount} properties.\nSee BepInEx console / LogOutput.log."
+            : $"Scanning for registry... tries={_tries}, lastCount={_lastCount}";
+        GUI.Label(new Rect(24, 100, 380, 60), s);
+        GUI.Label(new Rect(24, 168, 380, 22), "(no clicking needed - watch the console)");
     }
 
-    private void TryAutoDump()
+    private void TryDumpRegistry()
     {
         _tries++;
         try
         {
-            int count = DbSummaryPersonReference.GetPropertyCountInternal();
-            _lastCount = count;
-            Plugin.Logger.LogInfo($"[FM26 Scout Mod] auto-scan #{_tries}: GetPropertyCountInternal() = {count}");
-            if (count <= 0)
-                return; // schema not ready yet; try again in 2s
+            PropertyIdentifierSet reg = PropertyIdentifierSet.Instance;
+            if (reg == null)
+            {
+                Plugin.Logger.LogInfo($"[FM26 Scout Mod] scan #{_tries}: registry Instance is null (not ready yet)");
+                return;
+            }
 
-            DumpAll(count);
+            var dict = reg.m_idToInfo;
+            if (dict == null)
+            {
+                Plugin.Logger.LogInfo($"[FM26 Scout Mod] scan #{_tries}: m_idToInfo is null");
+                return;
+            }
+
+            int total = dict.Count;
+            _lastCount = total;
+            Plugin.Logger.LogInfo($"[FM26 Scout Mod] scan #{_tries}: registry has {total} properties");
+            if (total <= 0)
+                return;
+
+            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: property registry dump ({total}) =====");
+            int n = 0;
+            foreach (uint id in dict.Keys)
+            {
+                string name;
+                try { name = DbSummaryPersonReference.GetPropertyDescriptionInternal(id); }
+                catch { name = "<no desc>"; }
+
+                Plugin.Logger.LogInfo($"  {id} = {name}");
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    string low = name.ToLowerInvariant();
+                    if (low.Contains("abil") || low.Contains("potential") || low.Contains("reputation") || low.Contains("current ab"))
+                        Plugin.Logger.LogWarning($"  *** MATCH: {id} = {name} ***");
+                }
+                n++;
+            }
+            Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, dumped {n} properties =====");
             _dumped = true;
         }
         catch (System.Exception ex)
         {
-            Plugin.Logger.LogError($"[FM26 Scout Mod] auto-scan #{_tries} error: {ex.Message}");
+            Plugin.Logger.LogError($"[FM26 Scout Mod] scan #{_tries} error: {ex}");
         }
-    }
-
-    private void DumpAll(int count)
-    {
-        Plugin.Logger.LogInfo($"===== FM26 Scout Mod: person property dump (count={count}) =====");
-        int found = 0;
-        for (uint id = 0; id < 4096u; id++)
-        {
-            bool accepts;
-            try { accepts = DbSummaryPersonReference.AcceptsPropertyInternal(id); }
-            catch { continue; }
-            if (!accepts)
-                continue;
-
-            string desc;
-            try { desc = DbSummaryPersonReference.GetPropertyDescriptionInternal(id); }
-            catch { desc = "<err>"; }
-
-            Plugin.Logger.LogInfo($"  Prop {id} = {desc}");
-            found++;
-        }
-        Plugin.Logger.LogInfo($"===== FM26 Scout Mod: done, dumped {found} properties (count={count}) =====");
     }
 }
