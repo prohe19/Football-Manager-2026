@@ -52,7 +52,7 @@ public class ScoutUI : MonoBehaviour
                  : $"waiting for a loaded save... tries={_tries}");
     }
 
-    private void L(string msg) => Plugin.Logger.LogInfo(msg);
+    private static void L(string msg) => Plugin.Logger.LogInfo(msg);
 
     private void TryDumpStore()
     {
