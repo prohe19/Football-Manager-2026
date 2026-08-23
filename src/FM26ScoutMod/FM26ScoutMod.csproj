@@ -12,7 +12,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>FM26ScoutMod</AssemblyName>
     <Product>FM26 Scout Mod</Product>
-    <Version>0.9.0</Version>
+    <Version>0.9.1</Version>
     <LangVersion>latest</LangVersion>
     <!-- Nullable reference types clash with the IL2CPP interop assemblies (CS0656), so keep off. -->
     <Nullable>disable</Nullable>

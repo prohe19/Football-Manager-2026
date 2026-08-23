@@ -7,44 +7,37 @@ using UnityEngine;
 namespace FM26ScoutMod;
 
 /// <summary>
-/// Stage 2 (fetch hunt II) — find the live binding store and the real value read.
+/// Stage 2 (read the live store) — open the game's binding tree and dump values.
 ///
-/// v0.8.0 proved TryGetValue is only a client cache. FM26 reads attributes lazily
-/// through SI.Bindable.Bindings (data handlers fetch from the native game_plugin
-/// and Set the result into the binding tree). So this build hunts:
+/// v0.9.0 found the handle: FM.UI.EmbeddedDataHandler.s_bindingSubsystem is the
+/// live SI.Bindable.BindingSubsystem (null at the menu, set once a save loads).
+/// Its inherited Bindings.DataSet is the list of every value the UI has fetched.
 ///
-///   1. A live handle to the Bindings / BindingSubsystem singleton (static
-///      property/field/0-arg method returning it) — and, if found, reports how
-///      many live bindings it holds (DataSet count) + its root node.
-///   2. Any method that RETURNS a value for a reference/property — i.e. returns
-///      SI.Core.TypedValue, or is named Fetch/Query/GetPropertyValue/RequestData.
+/// This build retries until that static is non-null (i.e. in a save), then:
+///   - reports DataSet count,
+///   - dumps the element ("Data") type's members once so we learn its shape,
+///   - prints the first ~150 entries (path/key + value via reflection).
 ///
-/// One of these is the door to reading real player data. See binding-api-probe.md.
+/// Open a player's profile before it runs and their attributes should appear in
+/// the dump with their paths — the mapping we need to read any player. See
+/// docs/binding-api-probe.md.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
     public ScoutUI(System.IntPtr ptr) : base(ptr) { }
 
-    private static readonly string[] AsmFilters = { "SI.", "FM.", "Bindable" };
-    private static readonly string[] SingletonTypeNames = { "Bindings", "BindingSubsystem" };
-    private static readonly string[] FetchNameHints =
-    {
-        "GetPropertyValue", "Fetch", "Query", "RequestData", "ReadProperty",
-        "GetValueForProperty", "ResolveValue", "GetTypedValue",
-    };
-
     private bool _open = true;
     private bool _ran;
     private float _nextTry;
     private int _tries;
-    private int _lines;
+    private int _count = -1;
 
     private void OnGUI()
     {
         if (!_ran && Time.unscaledTime >= _nextTry)
         {
-            _nextTry = Time.unscaledTime + 2f;
-            TryProbe();
+            _nextTry = Time.unscaledTime + 3f;
+            TryDumpStore();
         }
 
         if (GUI.Button(new Rect(12, 12, 150, 30), _open ? "Scout  [-]" : "Scout  [+]"))
@@ -53,145 +46,152 @@ public class ScoutUI : MonoBehaviour
             return;
 
         GUI.Box(new Rect(12, 48, 400, 150), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - finding the live binding store");
-        GUI.Label(new Rect(24, 100, 380, 40), _ran ? $"DONE - {_lines} lines. See LogOutput.log." : $"probing... tries={_tries}");
+        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - dumping the live binding store");
+        GUI.Label(new Rect(24, 100, 380, 40),
+            _ran ? $"DONE - DataSet had {_count} entries.\nSee LogOutput.log."
+                 : $"waiting for a loaded save... tries={_tries}");
     }
 
-    private void L(string msg) { _lines++; Plugin.Logger.LogInfo(msg); }
+    private void L(string msg) => Plugin.Logger.LogInfo(msg);
 
-    private void TryProbe()
+    private void TryDumpStore()
     {
         _tries++;
         try
         {
-            var types = new List<Type>();
-            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            object subsystem = GetBindingSubsystem();
+            if (subsystem == null)
             {
-                string nm = null; try { nm = a.GetName().Name; } catch { }
-                if (nm == null) continue;
-                bool keep = false;
-                foreach (var f in AsmFilters) if (nm.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0) { keep = true; break; }
-                if (!keep) continue;
-                foreach (var t in SafeTypes(a)) if (t != null) types.Add(t);
+                L($"[FM26 Scout Mod] attempt #{_tries}: s_bindingSubsystem is null (load a save; will retry)");
+                return;
             }
 
-            L($"===== FM26 Scout Mod: FETCH HUNT II (v{Plugin.PluginVersion}) =====");
-            L($"scanned {types.Count} types");
+            L($"===== FM26 Scout Mod: LIVE BINDING STORE (v{Plugin.PluginVersion}) =====");
+            L($"  BindingSubsystem obtained: {subsystem.GetType().FullName}");
 
-            // 1) Singleton sources for Bindings / BindingSubsystem.
-            L("----- singleton sources (static member -> Bindings/BindingSubsystem) -----");
-            object liveBindings = null;
-            string liveFrom = null;
-            const BindingFlags SF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly;
-            foreach (var t in types)
-            {
-                foreach (var p in Safe(() => t.GetProperties(SF)))
-                {
-                    if (!IsSingletonType(p.PropertyType)) continue;
-                    L($"  PROP {t.FullName}.{p.Name} : {p.PropertyType.Name}");
-                    if (liveBindings == null) { liveBindings = TryGet(() => p.GetValue(null)); if (liveBindings != null) liveFrom = $"{t.Name}.{p.Name}"; }
-                }
-                foreach (var f in Safe(() => t.GetFields(SF)))
-                {
-                    if (!IsSingletonType(f.FieldType)) continue;
-                    L($"  FIELD {t.FullName}.{f.Name} : {f.FieldType.Name}");
-                    if (liveBindings == null) { liveBindings = TryGet(() => f.GetValue(null)); if (liveBindings != null) liveFrom = $"{t.Name}.{f.Name}"; }
-                }
-                foreach (var m in Safe(() => t.GetMethods(SF)))
-                {
-                    if (m.GetParameters().Length != 0) continue;
-                    Type rt = null; try { rt = m.ReturnType; } catch { }
-                    if (!IsSingletonType(rt)) continue;
-                    L($"  METHOD {t.FullName}.{m.Name}() : {rt.Name}");
-                    if (liveBindings == null) { liveBindings = TryGet(() => m.Invoke(null, null)); if (liveBindings != null) liveFrom = $"{t.Name}.{m.Name}()"; }
-                }
-            }
+            // DataSet is inherited from Bindings: IReadOnlyList<Data>.
+            MethodInfo getDataSet = FindNoArg(subsystem.GetType(), "get_DataSet");
+            if (getDataSet == null) { L("  get_DataSet() not found"); _ran = true; return; }
 
-            // If we got a live Bindings instance, report how much it holds.
-            if (liveBindings != null)
+            object list = getDataSet.Invoke(subsystem, null);
+            if (list == null) { L("  DataSet is null"); _ran = true; return; }
+
+            var lt = list.GetType();
+            MethodInfo getCount = FindNoArg(lt, "get_Count");
+            MethodInfo getItem = FindGetItem(lt);
+            int count = getCount != null ? Convert.ToInt32(getCount.Invoke(list, null)) : -1;
+            _count = count;
+            L($"  DataSet type={lt.Name}  count={count}  (getItem={(getItem != null)})");
+
+            if (count > 0 && getItem != null)
             {
-                L($"  >>> LIVE Bindings obtained from {liveFrom} (type {liveBindings.GetType().Name})");
-                try
+                // Dump the element type's members once so we learn how to read a Data.
+                object first = TryGet(() => getItem.Invoke(list, new object[] { 0 }));
+                if (first != null)
                 {
-                    var dsProp = liveBindings.GetType().GetProperty("DataSet");
-                    var ds = dsProp?.GetValue(liveBindings);
-                    var countProp = ds?.GetType().GetProperty("Count");
-                    var count = countProp?.GetValue(ds);
-                    L($"  >>> DataSet count = {count?.ToString() ?? "?"}");
+                    L($"----- Data element type: {first.GetType().FullName} -----");
+                    DumpMembers(first.GetType());
                 }
-                catch (Exception e) { L("  DataSet read err: " + e.Message); }
-                try
+
+                L("----- entries (first 150) -----");
+                int n = Math.Min(count, 150);
+                for (int i = 0; i < n; i++)
                 {
-                    var rootProp = liveBindings.GetType().GetProperty("RootNode");
-                    var root = rootProp?.GetValue(liveBindings);
-                    L($"  >>> RootNode = {(root == null ? "null" : "present")}");
+                    object d = TryGet(() => getItem.Invoke(list, new object[] { i }));
+                    if (d == null) { L($"  [{i}] <null>"); continue; }
+                    L($"  [{i}] {Describe(d)}");
                 }
-                catch (Exception e) { L("  RootNode read err: " + e.Message); }
-            }
-            else
-            {
-                L("  (no live Bindings instance obtained from a static member)");
             }
 
-            // 2) Methods that return a TypedValue, or are named like a fetch.
-            L("----- value-producing methods (return TypedValue, or fetch-named) -----");
-            int shown = 0;
-            foreach (var t in types)
-            {
-                MethodInfo[] ms;
-                try { ms = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly); }
-                catch { continue; }
-                foreach (var m in ms)
-                {
-                    string rn = null; try { rn = m.ReturnType?.Name; } catch { }
-                    bool retTyped = rn == "TypedValue";
-                    bool named = false;
-                    foreach (var h in FetchNameHints) if (m.Name.IndexOf(h, StringComparison.OrdinalIgnoreCase) >= 0) { named = true; break; }
-                    if (!retTyped && !named) continue;
-                    // keep the signal high: only in the binding/interop/UI namespaces
-                    string ns = t.Namespace ?? "";
-                    if (!(ns.StartsWith("SI.Bindable") || ns.StartsWith("SI.Interop") || ns.StartsWith("SI.Core") || ns.StartsWith("FM.UI")))
-                        continue;
-                    L($"  {t.FullName}.{Sig(m)}");
-                    if (++shown >= 120) { L("  ...(cap)"); goto done; }
-                }
-            }
-        done:
-            L($"===== FM26 Scout Mod: fetch hunt II done, {_lines} lines =====");
+            L("===== FM26 Scout Mod: live store dump done =====");
             _ran = true;
         }
         catch (Exception ex)
         {
-            Plugin.Logger.LogError($"[FM26 Scout Mod] probe #{_tries} error: {ex}");
+            Plugin.Logger.LogError($"[FM26 Scout Mod] dump #{_tries} error: {ex}");
         }
     }
 
-    private static bool IsSingletonType(Type t)
+    // Locate FM.UI.EmbeddedDataHandler.s_bindingSubsystem (a static) reflectively.
+    private static object GetBindingSubsystem()
     {
-        if (t == null) return false;
-        foreach (var n in SingletonTypeNames) if (t.Name == n) return true;
-        return false;
+        foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            string nm = null; try { nm = a.GetName().Name; } catch { }
+            if (nm != "FM.UI") continue;
+            Type t = null;
+            try { foreach (var x in a.GetTypes()) if (x?.Name == "EmbeddedDataHandler") { t = x; break; } }
+            catch (ReflectionTypeLoadException ex) { foreach (var x in ex.Types) if (x?.Name == "EmbeddedDataHandler") { t = x; break; } }
+            catch { }
+            if (t == null) return null;
+
+            const BindingFlags SF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            var p = t.GetProperty("s_bindingSubsystem", SF);
+            if (p != null) { var v = TryGet(() => p.GetValue(null)); if (v != null) return v; }
+            var f = t.GetField("s_bindingSubsystem", SF);
+            if (f != null) { var v = TryGet(() => f.GetValue(null)); if (v != null) return v; }
+            return null;
+        }
+        return null;
     }
 
-    private static object TryGet(Func<object> f) { try { return f(); } catch { return null; } }
-
-    private static string Sig(MethodInfo m)
+    // Build a readable "key/path = value" string from a Data element via reflection.
+    private static string Describe(object d)
     {
         var sb = new StringBuilder();
-        if (m.IsStatic) sb.Append("static ");
-        Type rt = null; try { rt = m.ReturnType; } catch { }
-        sb.Append(rt?.Name ?? "?").Append(' ').Append(m.Name).Append('(');
-        var ps = Safe(() => m.GetParameters());
-        for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(ps[i].ParameterType?.Name ?? "?").Append(' ').Append(ps[i].Name); }
-        return sb.Append(')').ToString();
+        Type t = d.GetType();
+        foreach (var name in new[] { "Key", "Path", "FullPath", "Name" })
+        {
+            var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (p != null) { var v = TryGet(() => p.GetValue(d)); if (v != null) { sb.Append(name).Append('=').Append(Trunc(v.ToString())).Append("  "); } }
+        }
+        foreach (var name in new[] { "Value", "TypedValue", "Current" })
+        {
+            var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (p != null) { var v = TryGet(() => p.GetValue(d)); sb.Append(name).Append('=').Append(v == null ? "null" : Trunc(v.ToString())).Append("  "); }
+        }
+        if (sb.Length == 0) sb.Append("ToString=").Append(Trunc(d.ToString()));
+        return sb.ToString();
     }
 
+    private static void DumpMembers(Type t)
+    {
+        const BindingFlags F = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+        foreach (var p in Safe(() => t.GetProperties(F))) L($"     prop {Short(p.PropertyType)} {p.Name}");
+        foreach (var f in Safe(() => t.GetFields(F))) L($"     field {Short(f.FieldType)} {f.Name}");
+        foreach (var m in Safe(() => t.GetMethods(F)))
+        {
+            if (m.Name.StartsWith("get_", StringComparison.Ordinal) || m.Name.StartsWith("set_", StringComparison.Ordinal)) continue;
+            var ps = m.GetParameters(); var sb = new StringBuilder();
+            for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(Short(ps[i].ParameterType)); }
+            L($"     method {Short(SafeRet(m))} {m.Name}({sb})");
+        }
+    }
+
+    private static Type SafeRet(MethodInfo m) { try { return m.ReturnType; } catch { return null; } }
+    private static string Short(Type t) => t?.Name ?? "?";
+    private static string Trunc(string s) => s == null ? "null" : (s.Length > 120 ? s.Substring(0, 120) + "…" : s);
+    private static object TryGet(Func<object> f) { try { return f(); } catch { return null; } }
     private static T[] Safe<T>(Func<T[]> f) { try { return f() ?? Array.Empty<T>(); } catch { return Array.Empty<T>(); } }
 
-    private static IEnumerable<Type> SafeTypes(Assembly a)
+    private static MethodInfo FindNoArg(Type t, string name)
     {
-        try { return a.GetTypes(); }
-        catch (ReflectionTypeLoadException ex) { return ex.Types ?? Array.Empty<Type>(); }
-        catch { return Array.Empty<Type>(); }
+        try { foreach (var m in t.GetMethods()) if (m.Name == name && m.GetParameters().Length == 0) return m; } catch { }
+        return null;
+    }
+
+    private static MethodInfo FindGetItem(Type t)
+    {
+        try
+        {
+            foreach (var m in t.GetMethods())
+            {
+                if (m.Name != "get_Item") continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 1 && (ps[0].ParameterType == typeof(int) || ps[0].ParameterType.Name == "Int32")) return m;
+            }
+        }
+        catch { }
+        return null;
     }
 }
