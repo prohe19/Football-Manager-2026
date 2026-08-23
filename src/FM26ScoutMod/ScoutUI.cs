@@ -46,9 +46,12 @@ public class ScoutUI : MonoBehaviour
 
     private void OnGUI()
     {
+        // Retry until we actually find people. The DB is empty at the main menu
+        // and only populates once a save is loaded, so we keep scanning every few
+        // seconds and only stop once we've read real players.
         if (!_ran && Time.unscaledTime >= _nextTry)
         {
-            _nextTry = Time.unscaledTime + 2f;
+            _nextTry = Time.unscaledTime + 3f;
             TryReadPlayers();
         }
 
@@ -76,29 +79,42 @@ public class ScoutUI : MonoBehaviour
         try
         {
             MethodInfo tryGet = FindTryGetValue();
+            MethodInfo acceptsProp = FindMethod("AcceptsProperty");
             if (tryGet == null)
             {
                 L($"[FM26 Scout Mod] read #{_tries}: TryGetValue(uint, out int) not found yet, retrying");
                 return;
             }
 
-            L($"===== FM26 Scout Mod: FIRST VALUE READ (v{Plugin.PluginVersion}) =====");
+            // reset the tallies for this pass
+            _scanned = 0; _valid = 0; _players = 0;
+            _bestCA = -1; _bestCAidx = -1; _bestPA = -1; _bestPAidx = -1;
 
-            // Sanity: the root game reference should resolve once a save is live.
-            try
-            {
-                var game = GameReference.GetInstance();
-                L($"  GameReference.GetInstance() -> {(game == null ? "null" : "ok")}");
-            }
-            catch (Exception e) { L("  GameReference.GetInstance() err: " + e.Message); }
+            int ctorOk = 0, ctorThrew = 0, readAllFalse = 0;
+            bool loggedFirst = false;
+            var detail = new List<string>();
 
-            int shown = 0;
             for (int i = 0; i < ScanCount; i++)
             {
                 PersonReference p;
                 try { p = new PersonReference(i); }
-                catch { continue; }
-                if (p == null) continue;
+                catch { ctorThrew++; continue; }
+                if (p == null) { ctorThrew++; continue; }
+                ctorOk++;
+
+                // One-time diagnostic on the first person we manage to build:
+                // does it even accept the CA property?
+                if (!loggedFirst)
+                {
+                    loggedFirst = true;
+                    string acc = "?";
+                    if (acceptsProp != null)
+                    {
+                        try { acc = (acceptsProp.Invoke(p, new object[] { PID_PlayerCA }) as bool?)?.ToString() ?? "?"; }
+                        catch (Exception e) { acc = "err:" + e.Message; }
+                    }
+                    L($"  probe person #{i}: AcceptsProperty(PlayerCA)={acc}");
+                }
 
                 int isP = ReadInt(tryGet, p, PID_IsPlayer, out bool okIsP);
                 int age = ReadInt(tryGet, p, PID_Age, out bool okAge);
@@ -107,7 +123,10 @@ public class ScoutUI : MonoBehaviour
                 int nca = ReadInt(tryGet, p, PID_NonPlayerCA, out bool okNCA);
 
                 if (!(okIsP || okAge || okPCA || okPPA || okNCA))
-                    continue;   // nothing readable at this index
+                {
+                    readAllFalse++;
+                    continue;
+                }
 
                 _scanned++;
                 if (okIsP && isP != 0) _players++;
@@ -115,14 +134,26 @@ public class ScoutUI : MonoBehaviour
                 if (okPCA && pca > _bestCA) { _bestCA = pca; _bestCAidx = i; }
                 if (okPPA && ppa > _bestPA) { _bestPA = ppa; _bestPAidx = i; }
 
-                if (shown < 30)
-                {
-                    shown++;
-                    L($"  #{i} isPlayer={fmt(okIsP, isP)} age={fmt(okAge, age)} " +
-                      $"PlayerCA={fmt(okPCA, pca)} PlayerPA={fmt(okPPA, ppa)} NonPlayerCA={fmt(okNCA, nca)}");
-                }
+                if (detail.Count < 30)
+                    detail.Add($"  #{i} isPlayer={fmt(okIsP, isP)} age={fmt(okAge, age)} " +
+                               $"PlayerCA={fmt(okPCA, pca)} PlayerPA={fmt(okPPA, ppa)} NonPlayerCA={fmt(okNCA, nca)}");
             }
 
+            if (_valid == 0)
+            {
+                // Not in a save yet (or wrong addressing) — log one concise line and keep retrying.
+                bool gameOk = false;
+                try { gameOk = GameReference.GetInstance() != null; } catch { }
+                L($"[FM26 Scout Mod] attempt #{_tries}: valid=0 " +
+                  $"(ctorOk={ctorOk}, ctorThrew={ctorThrew}, readsAllFalse={readAllFalse}, gameRef={gameOk}). " +
+                  $"Load a save if you haven't — will keep retrying.");
+                return;
+            }
+
+            // Success — dump the details once and stop retrying.
+            L($"===== FM26 Scout Mod: FIRST VALUE READ (v{Plugin.PluginVersion}) =====");
+            L($"  ctorOk={ctorOk} ctorThrew={ctorThrew} readsAllFalse={readAllFalse}");
+            foreach (var line in detail) L(line);
             L($"----- summary: scanned={_scanned} valid={_valid} players={_players} " +
               $"bestPlayerCA={_bestCA} @#{_bestCAidx}  bestPlayerPA={_bestPA} @#{_bestPAidx} -----");
             L("===== FM26 Scout Mod: value read done =====");
@@ -148,6 +179,23 @@ public class ScoutUI : MonoBehaviour
                 if (m.Name != "TryGetValue") continue;
                 var ps = m.GetParameters();
                 if (ps.Length == 2 && ps[0].ParameterType == typeof(uint))
+                    return m;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // Find a single-uint-arg method by name on PersonReference (e.g. AcceptsProperty).
+    private static MethodInfo FindMethod(string name)
+    {
+        try
+        {
+            foreach (var m in typeof(PersonReference).GetMethods())
+            {
+                if (m.Name != name) continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 1 && ps[0].ParameterType == typeof(uint))
                     return m;
             }
         }
