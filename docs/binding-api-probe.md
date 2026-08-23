@@ -195,3 +195,48 @@ reads (Top-10-by-CA across everyone) require either driving the binding subsyste
 / native fetch, or reading the save file / process memory the way Genie Scout
 does. Next: hunt for a live handle to the `Bindings` store (it already holds
 fetched values) and any method returning a typed value for a reference+property.
+
+---
+
+## ⛔ v0.9.x conclusion — the managed layer can't do a bulk DB read
+
+We reached the live store: `FM.UI.EmbeddedDataHandler.s_bindingSubsystem` is the
+running `SI.Bindable.BindingSubsystem` (non-null once a save is loaded). Its
+`Bindings.DataSet` is an `IReadOnlyList<IReadOnlyData>` where each element is:
+
+```
+SI.Bindable.IReadOnlyData
+    DataKey   Key     // SI.Bindable.Bindings+DataKey — an opaque HASH, no readable path
+    TypedValue Value  // null for every slot we saw
+```
+
+Empirically the pool has ~4000 slots and every entry we enumerated has an opaque
+hashed key and **`Value = null`**. So the managed binding tree is a low-level,
+hash-keyed node pool that is mostly empty — not a table of player→attribute.
+
+**Why this is a dead end for the original goal.** FM26 keeps the real attribute
+database in the native `game_plugin` (C++). The managed UI reads values *lazily*:
+when a screen displays a player, a data handler fetches from native and pushes a
+value into the binding tree for just that on-screen data. Consequences:
+
+- There is no managed call that returns "person X's CA" on demand.
+- Even harvesting the binding tree only yields whatever the UI is *currently*
+  drawing (a handful of players), with opaque hashed keys.
+- "Top-N by CA across the whole database" requires every player's data, which the
+  game never bulk-loads into managed memory.
+
+**Therefore bulk scouting (Top players / wonderkids / staff across the DB) cannot
+come from the managed/binding layer.** It requires reading the database directly:
+
+1. **Save-file parsing** — how FM Genie Scout actually works: read the `.fm` save
+   off disk and decode records. Gives full bulk data; independent of the running
+   game; but is a large reverse-engineering effort on FM26's save format.
+2. **Native process-memory reading** — read `game_plugin`'s in-memory DB structs.
+   Also large RE, and fragile across patches.
+3. **Scope down to on-screen enhancement** — an in-game overlay that reads/annotates
+   the player the UI is *already* showing (via the binding tree). Achievable, but
+   not the full-DB Top-N vision.
+
+What we *have* firmly delivered: BepInEx injection + in-game IMGUI overlay, and a
+complete, reproducible map of FM26's property schema (see property-ids.md). Those
+are solid foundations regardless of which data-read path we choose next.
