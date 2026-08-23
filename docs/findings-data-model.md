@@ -80,7 +80,14 @@ Confirmed by calling the methods live from the mod:
 
 ## Open questions (for step 2/3)
 
-- Exact shape of `PropertyID` / `ReferenceID` (how to get/pass the raw uint).
-- Which reference type exposes CA/PA (and the full attribute set).
-- How to read a *typed value* for (ReferenceID, PropertyID) — the binding call.
-- How to get the list of all person ReferenceIDs (the "all players" query).
+Mostly answered by the v0.5.0 binding-API probe — see [binding-api-probe.md](binding-api-probe.md).
+
+- ✅ Exact shape of `PropertyID` / `ReferenceID` — both are `struct`s wrapping a
+  single `uint id`, with `.ctor(uint)` and implicit `uint`⇄`PropertyID`/`ReferenceID`.
+- ✅ How to read a *typed value* — `SI.Interop.InteropReference` (base of every
+  `…Reference`) has **`bool TryGetValue(uint propertyId, out int value)`**.
+- ⬜ Which reference type exposes CA/PA for a *specific person* (candidates:
+  `PersonReference`, `IPlayerReference`, `PlayerAttributeReference`).
+- ⬜ How to obtain a live person `ReferenceID` / a bound reference (the "all
+  players" query) — the last missing link, via `ReferenceIdentifierSet` or the
+  `SI.Bindable` binding subsystem.
