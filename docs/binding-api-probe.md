@@ -130,3 +130,34 @@ reference instance) from the loaded save. Two routes to try next:
 
 The next build (v0.6.0) does a focused deep-dump of those types **and** attempts
 a first real read, so we go from "we know the call" to "we printed a CA".
+
+---
+
+## ✅ v0.6.0 result — the database shortcut
+
+The navigation dump revealed we don't need to walk Club→Squad at all. Person
+records are **directly indexable**:
+
+```
+FM.UI.PersonReference : FM.UI.DatabaseRecordReference : ... : SI.Interop.InteropReference
+    .ctor(Int32 index)     // build person #index straight from the DB
+    .ctor(List<PropertyID> ids)
+    static PersonReference GetInstance()
+```
+
+`ClubReference`, `TeamReference`, and `NationalTeamContainerReference` share the
+same `DatabaseRecordReference` base and the same `.ctor(Int32 index)` — the whole
+database is index-addressable. And because `PersonReference` inherits
+`InteropReference.TryGetValue(uint, out int)`, the read is simply:
+
+```csharp
+var p = new PersonReference(index);
+p.TryGetValue(1346584898u, out int currentAbility);   // PlayerCurrentAbility
+p.TryGetValue(1347436866u, out int potentialAbility);  // PlayerPotentialAbility
+```
+
+Root object confirmed too: `GameReference.GetInstance()` (a static singleton).
+
+So v0.7.0 scans person indices and reads IsPlayer / Age / CA / PA for each — the
+first real values out of the save. This is exactly how external tools read the
+DB, but from inside the running game.
