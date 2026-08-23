@@ -77,30 +77,34 @@ public class ScoutUI : MonoBehaviour
             if (list == null) { L("  DataSet is null"); _ran = true; return; }
 
             var lt = list.GetType();
-            MethodInfo getCount = FindNoArg(lt, "get_Count");
             MethodInfo getItem = FindGetItem(lt);
-            int count = getCount != null ? Convert.ToInt32(getCount.Invoke(list, null)) : -1;
+            int count = GetCount(list, lt);
             _count = count;
             L($"  DataSet type={lt.Name}  count={count}  (getItem={(getItem != null)})");
 
-            if (count > 0 && getItem != null)
+            if (getItem != null)
             {
-                // Dump the element type's members once so we learn how to read a Data.
-                object first = TryGet(() => getItem.Invoke(list, new object[] { 0 }));
-                if (first != null)
+                // Enumerate by index; if Count is unknown, probe until get_Item throws.
+                int cap = count >= 0 ? Math.Min(count, 6000) : 6000;
+                bool shapeDumped = false;
+                int printed = 0, got = 0;
+                for (int i = 0; i < cap; i++)
                 {
-                    L($"----- Data element type: {first.GetType().FullName} -----");
-                    DumpMembers(first.GetType());
+                    object d;
+                    try { d = getItem.Invoke(list, new object[] { i }); }
+                    catch { break; }   // ran off the end
+                    if (d == null) continue;
+                    got++;
+                    if (!shapeDumped)
+                    {
+                        shapeDumped = true;
+                        L($"----- Data element type: {d.GetType().FullName} -----");
+                        DumpMembers(d.GetType());
+                        L("----- entries (first 200) -----");
+                    }
+                    if (printed < 200) { printed++; L($"  [{i}] {Describe(d)}"); }
                 }
-
-                L("----- entries (first 150) -----");
-                int n = Math.Min(count, 150);
-                for (int i = 0; i < n; i++)
-                {
-                    object d = TryGet(() => getItem.Invoke(list, new object[] { i }));
-                    if (d == null) { L($"  [{i}] <null>"); continue; }
-                    L($"  [{i}] {Describe(d)}");
-                }
+                L($"  enumerated {got} entries (printed {printed})");
             }
 
             L("===== FM26 Scout Mod: live store dump done =====");
@@ -173,6 +177,17 @@ public class ScoutUI : MonoBehaviour
     private static string Trunc(string s) => s == null ? "null" : (s.Length > 120 ? s.Substring(0, 120) + "…" : s);
     private static object TryGet(Func<object> f) { try { return f(); } catch { return null; } }
     private static T[] Safe<T>(Func<T[]> f) { try { return f() ?? Array.Empty<T>(); } catch { return Array.Empty<T>(); } }
+
+    // Count may live on a base interface (IReadOnlyCollection) not surfaced by
+    // GetMethods() on the IReadOnlyList proxy — so check the interfaces too.
+    private static int GetCount(object list, Type lt)
+    {
+        MethodInfo m = FindNoArg(lt, "get_Count");
+        if (m == null)
+            foreach (var it in Safe(lt.GetInterfaces)) { m = FindNoArg(it, "get_Count"); if (m != null) break; }
+        if (m == null) return -1;
+        try { return Convert.ToInt32(m.Invoke(list, null)); } catch { return -1; }
+    }
 
     private static MethodInfo FindNoArg(Type t, string name)
     {
