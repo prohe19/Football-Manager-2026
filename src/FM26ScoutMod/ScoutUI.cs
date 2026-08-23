@@ -9,23 +9,25 @@ using SI.Bindable.Reference.Core;
 namespace FM26ScoutMod;
 
 /// <summary>
-/// Stage 2 (step 2, "plan A") — probe FM26's binding API.
+/// Stage 2 (step 3) — find the entry point from "loaded save" to "a player".
 ///
-/// We already have the PropertyIDs (see docs/property-ids.md). What we DON'T yet
-/// know is the exact call that turns (a person Reference + a PropertyID) into a
-/// value. Rather than guess, this build reflects over the loaded FM26 / SI
-/// assemblies and dumps the API surface:
+/// The v0.5.0 probe answered how to READ a value:
+///   SI.Interop.InteropReference.TryGetValue(uint propertyId, out int value)
+/// and that PropertyID/ReferenceID are thin uint wrappers. See
+/// docs/binding-api-probe.md.
 ///
-///   1. Every *Reference / *Binding / *Property / *Person / *Player type name
-///      (so we can spot a "rich" reference type that exposes CA/PA).
-///   2. Full method + constructor signatures for the key types
-///      (DbSummaryPersonReference, PropertyID, ReferenceID, PropertyIdentifierSet…).
-///   3. "CANDIDATE READERS" — any method that takes a PropertyID/uint and returns
-///      a primitive/string/binding. These are our value-read call candidates.
+/// The one missing link is holding a live reference bound to a real person.
+/// This build deep-dumps (full ctor + method + field signatures) the
+/// navigation chain and the binding plumbing so we can see how the game hands
+/// out a person/player reference:
 ///
-/// Runs automatically (no clicking — FM's UI eats our clicks): a couple of
-/// seconds after load, dumps once to the BepInEx console / LogOutput.log.
-/// See docs/findings-data-model.md and docs/binding-api-probe.md.
+///   Game → Club/Team → Squad → Person/Player references,
+///   the reference registry (ReferenceIdentifierSet / ReferenceIDInfo),
+///   and the SI.Bindable value helpers (Bindings / BindingSubsystem /
+///   VisualFunctionLibrary GetPropertyValue / GetDynamicReference).
+///
+/// Output is deliberately small and targeted (no 4,000-line sweep). Runs once
+/// automatically a couple of seconds after a save is loaded.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
@@ -41,12 +43,25 @@ public class ScoutUI : MonoBehaviour
     // Only dig into assemblies that are FM26's own game/binding code.
     private static readonly string[] AsmFilters = { "SI.", "FM.", "Bindable" };
 
-    // Types we want a FULL method/ctor dump for (matched by simple Name).
+    // Full method/ctor/field dump for exactly these types (matched by simple Name):
+    // the navigation chain to a player, the reference registry, and the binding
+    // value plumbing. Kept small on purpose.
     private static readonly HashSet<string> DeepDump = new(StringComparer.Ordinal)
     {
-        "DbSummaryPersonReference", "PropertyID", "ReferenceID",
-        "PropertyIdentifierSet", "PropertyIDInfo", "IdentifierInfo",
-        "InteropReference", "BindingKind", "ContextID",
+        // --- navigation: how to walk to a real person/player ---
+        "GameReference", "ClubReference", "TeamReference", "TeamSquadReference",
+        "TacticsTeamSelectionReference", "SquadOverviewPlayerReference",
+        "PersonReference", "IPlayerReference", "IPersonBaseReference",
+        "INonPlayerReference", "PlayerAttributeReference", "MatchPlayerReference",
+        "NationalTeamContainerReference",
+        // --- the reference registry (mirror of PropertyIdentifierSet) ---
+        "ReferenceIdentifierSet", "ReferenceIDInfo",
+        // --- binding value plumbing (how the UI resolves a value) ---
+        "Bindings", "BindingSubsystem",
+        "VisualFunctionLibrary_GetPropertyValue",
+        "VisualFunctionLibrary_TryGetDataReference",
+        "VisualFunctionLibrary_GetDynamicReference",
+        "DynamicReference",
     };
 
     private void OnGUI()
@@ -63,10 +78,10 @@ public class ScoutUI : MonoBehaviour
             return;
 
         GUI.Box(new Rect(12, 48, 400, 150), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - probing the binding API");
+        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - mapping Game->Club->Squad->Player");
         string s = _dumped
             ? $"DONE - dumped {_lines} lines.\nSee BepInEx console / LogOutput.log."
-            : $"Probing... tries={_tries}";
+            : $"Mapping... tries={_tries}";
         GUI.Label(new Rect(24, 100, 380, 40), s);
         GUI.Label(new Rect(24, 150, 380, 40), "(no clicking needed - watch the console,\n then send me LogOutput.log)");
     }
@@ -82,8 +97,6 @@ public class ScoutUI : MonoBehaviour
         _tries++;
         try
         {
-            // Collect FM26's game/binding assemblies. Start from types we know are
-            // loaded, then sweep the AppDomain for anything matching our filters.
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var asms = new List<Assembly>();
             AddAsm(asms, seen, SafeAsm(() => typeof(PropertyIdentifierSet).Assembly));
@@ -103,68 +116,29 @@ public class ScoutUI : MonoBehaviour
                 return;
             }
 
-            L($"===== FM26 Scout Mod: BINDING API PROBE (v{Plugin.PluginVersion}) =====");
-            L($"target assemblies ({asms.Count}):");
-            foreach (var a in asms) L($"  ASM {a.GetName().Name}");
-
-            // Gather all types once (robust against ReflectionTypeLoadException).
             var allTypes = new List<Type>();
             foreach (var a in asms)
                 foreach (var t in SafeTypes(a))
                     if (t != null) allTypes.Add(t);
-            L($"total types across targets: {allTypes.Count}");
 
-            // ---- Section 1: interesting type NAMES (reference/binding/property/person/player) ----
-            L("----- interesting types (name filter) -----");
-            foreach (var t in allTypes)
-            {
-                string n = t.Name ?? "";
-                if (Contains(n, "Reference") || Contains(n, "Binding") || Contains(n, "Bindable")
-                    || Contains(n, "Property") || Contains(n, "Person") || Contains(n, "Player"))
-                    L($"  TYPE {t.FullName}");
-            }
+            L($"===== FM26 Scout Mod: NAVIGATION + PLUMBING DUMP (v{Plugin.PluginVersion}) =====");
+            L($"scanned {asms.Count} assemblies, {allTypes.Count} types");
 
-            // ---- Section 2: deep method/ctor dump for the key types ----
-            L("----- deep dump of key types -----");
+            // Deep dump the curated navigation / registry / plumbing types.
+            var found = new HashSet<string>(StringComparer.Ordinal);
             foreach (var t in allTypes)
             {
                 if (t.Name != null && DeepDump.Contains(t.Name))
-                    DumpType(t);
-            }
-
-            // ---- Section 3: CANDIDATE READERS — methods (…, PropertyID/uint, …) -> value ----
-            L("----- CANDIDATE READERS: (PropertyID/uint) -> primitive/string/binding -----");
-            foreach (var t in allTypes)
-            {
-                MethodInfo[] methods;
-                try { methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly); }
-                catch { continue; }
-                foreach (var m in methods)
                 {
-                    bool takesProp = false;
-                    ParameterInfo[] ps;
-                    try { ps = m.GetParameters(); } catch { continue; }
-                    foreach (var p in ps)
-                    {
-                        string pn = p.ParameterType?.Name ?? "";
-                        if (pn == "PropertyID" || pn == "UInt32") { takesProp = true; break; }
-                    }
-                    if (!takesProp) continue;
-
-                    string rn = null;
-                    try { rn = m.ReturnType?.Name; } catch { }
-                    if (rn == null) continue;
-                    bool valueish = m.ReturnType.IsPrimitive || rn == "String"
-                        || Contains(rn, "Binding") || rn == "Single" || rn == "Int32"
-                        || rn == "Int16" || rn == "Byte" || rn == "Boolean";
-                    if (!valueish) continue;
-
-                    L($"  READER {t.FullName}.{Sig(m)}");
-                    if (_lines > 4000) { L("  ...(reader cap hit, stopping)"); goto done; }
+                    DumpType(t);
+                    found.Add(t.Name);
                 }
             }
-        done:
-            L($"===== FM26 Scout Mod: probe done, {_lines} lines =====");
+            foreach (var want in DeepDump)
+                if (!found.Contains(want))
+                    L($"  (not found: {want})");
+
+            L($"===== FM26 Scout Mod: dump done, {_lines} lines =====");
             _dumped = true;
         }
         catch (Exception ex)
@@ -178,6 +152,7 @@ public class ScoutUI : MonoBehaviour
         try
         {
             L($"  == {t.FullName}  (base: {t.BaseType?.FullName ?? "?"}) ==");
+
             ConstructorInfo[] ctors;
             try { ctors = t.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly); }
             catch { ctors = Array.Empty<ConstructorInfo>(); }
@@ -194,9 +169,13 @@ public class ScoutUI : MonoBehaviour
             try { methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly); }
             catch { methods = Array.Empty<MethodInfo>(); }
             foreach (var m in methods)
+            {
+                // Skip trivial auto-property backing accessors to keep it readable.
+                if (m.Name.StartsWith("get__", StringComparison.Ordinal) || m.Name.StartsWith("set__", StringComparison.Ordinal))
+                    continue;
                 L($"     {Sig(m)}");
+            }
 
-            // fields too (PropertyID / ReferenceID likely wrap a raw uint field)
             FieldInfo[] fields;
             try { fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly); }
             catch { fields = Array.Empty<FieldInfo>(); }
@@ -224,7 +203,6 @@ public class ScoutUI : MonoBehaviour
 
     private static Type SafeReturn(MethodInfo m) { try { return m.ReturnType; } catch { return null; } }
     private static string Short(Type t) { return t?.Name ?? "?"; }
-    private static bool Contains(string s, string sub) => s != null && s.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static Assembly SafeAsm(Func<Assembly> f) { try { return f(); } catch { return null; } }
 
