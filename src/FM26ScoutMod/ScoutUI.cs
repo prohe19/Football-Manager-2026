@@ -1,58 +1,53 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Text;
 using UnityEngine;
 using FM.UI;
 
 namespace FM26ScoutMod;
 
 /// <summary>
-/// Stage 2 (final) — read REAL player values from the database.
+/// Stage 2 (fetch hunt) — find how to FETCH a value, not just read the cache.
 ///
-/// The v0.6.0 navigation dump revealed the shortcut:
-///   FM.UI.PersonReference : DatabaseRecordReference : ... : SI.Interop.InteropReference
-///   PersonReference has a  .ctor(Int32 index)  — build person #index directly,
-///   and inherits  bool TryGetValue(uint propertyId, out int value)  from
-///   InteropReference. So we can read the DB straight by index, no UI needed.
+/// v0.7.1 proved: new PersonReference(index) constructs fine and
+/// AcceptsProperty(PlayerCA)=True, but InteropReference.TryGetValue(uint,out int)
+/// returns false for every property. So TryGetValue reads a local value cache the
+/// binding system fills when the UI binds a reference — it is NOT a live DB fetch.
 ///
-/// This build scans person indices 0..N, and for each reads (via reflection, so
-/// we don't depend on the exact out/ref signature Il2CppInterop generated):
-///   IsPlayer (862938733), Age (825565216),
-///   PlayerCurrentAbility (1346584898), PlayerPotentialAbility (1347436866),
-///   NonPlayerCurrentAbility (862020186).
-/// It logs the first valid people plus the best CA/PA found — the proof that we
-/// can read live abilities. See docs/property-ids.md and docs/binding-api-probe.md.
+/// This build dumps the COMPLETE callable surface of a person reference (walking
+/// the whole base chain: PersonReference -> DatabaseRecordReference ->
+/// InteropReference) plus the interop factories and SI.Core.Record, so we can see
+/// the real fetch/enumerate call. It also runs small live experiments (TryGetValue
+/// vs TryGetProperty, and PersonReference.GetInstance()) and logs the results.
+///
+/// See docs/binding-api-probe.md.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
     public ScoutUI(System.IntPtr ptr) : base(ptr) { }
 
-    // Property IDs (from docs/property-ids.md).
-    private const uint PID_IsPlayer      = 862938733;
-    private const uint PID_Age           = 825565216;
-    private const uint PID_PlayerCA      = 1346584898;
-    private const uint PID_PlayerPA      = 1347436866;
-    private const uint PID_NonPlayerCA   = 862020186;
-
-    private const int ScanCount = 3000;   // how many person indices to try this pass
+    private const uint PID_PlayerCA = 1346584898;
 
     private bool _open = true;
     private bool _ran;
     private float _nextTry;
     private int _tries;
+    private int _lines;
 
-    // results for the on-screen panel
-    private int _scanned, _valid, _players, _bestCA = -1, _bestCAidx = -1, _bestPA = -1, _bestPAidx = -1;
+    // Extra types (beyond the PersonReference chain) to dump declared members of.
+    private static readonly string[] ExtraDumps =
+    {
+        "DatabaseRecordReferenceFactory", "FMInteropReferenceFactory",
+        "IInteropReferenceFactory", "Record", "DynamicReference",
+    };
 
     private void OnGUI()
     {
-        // Retry until we actually find people. The DB is empty at the main menu
-        // and only populates once a save is loaded, so we keep scanning every few
-        // seconds and only stop once we've read real players.
         if (!_ran && Time.unscaledTime >= _nextTry)
         {
-            _nextTry = Time.unscaledTime + 3f;
-            TryReadPlayers();
+            _nextTry = Time.unscaledTime + 2f;
+            TryProbe();
         }
 
         if (GUI.Button(new Rect(12, 12, 150, 30), _open ? "Scout  [-]" : "Scout  [+]"))
@@ -60,134 +55,101 @@ public class ScoutUI : MonoBehaviour
         if (!_open)
             return;
 
-        GUI.Box(new Rect(12, 48, 400, 170), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - reading real player abilities");
-        string s = _ran
-            ? $"scanned {_scanned}, valid {_valid}, players {_players}\n" +
-              $"best CA = {_bestCA} (person #{_bestCAidx})\n" +
-              $"best PA = {_bestPA} (person #{_bestPAidx})"
-            : $"reading... tries={_tries}";
-        GUI.Label(new Rect(24, 100, 380, 80), s);
-        GUI.Label(new Rect(24, 186, 380, 22), "(details in BepInEx console / LogOutput.log)");
+        GUI.Box(new Rect(12, 48, 400, 150), "FM26 Scout Mod  v" + Plugin.PluginVersion);
+        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - hunting the value-fetch call");
+        GUI.Label(new Rect(24, 100, 380, 40), _ran ? $"DONE - dumped {_lines} lines.\nSee LogOutput.log." : $"probing... tries={_tries}");
     }
 
-    private void L(string msg) => Plugin.Logger.LogInfo(msg);
+    private void L(string msg) { _lines++; Plugin.Logger.LogInfo(msg); }
 
-    private void TryReadPlayers()
+    private void TryProbe()
     {
         _tries++;
         try
         {
-            MethodInfo tryGet = FindTryGetValue();
-            MethodInfo acceptsProp = FindMethod("AcceptsProperty");
-            if (tryGet == null)
+            L($"===== FM26 Scout Mod: FETCH HUNT (v{Plugin.PluginVersion}) =====");
+
+            // 1) Full callable surface of a person reference, base chain included.
+            L("----- PersonReference inheritance chain (declared members per level) -----");
+            DumpChain(typeof(PersonReference));
+
+            // 2) A few related types (factories / Record) that might expose the fetch.
+            L("----- related types -----");
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in typeof(PersonReference).Assembly.GetTypes())
             {
-                L($"[FM26 Scout Mod] read #{_tries}: TryGetValue(uint, out int) not found yet, retrying");
-                return;
+                if (t?.Name != null && Array.IndexOf(ExtraDumps, t.Name) >= 0 && seen.Add(t.FullName))
+                    DumpType(t);
+            }
+            foreach (var t in typeof(SI.Interop.InteropReference).Assembly.GetTypes())
+            {
+                if (t?.Name != null && Array.IndexOf(ExtraDumps, t.Name) >= 0 && seen.Add(t.FullName))
+                    DumpType(t);
             }
 
-            // reset the tallies for this pass
-            _scanned = 0; _valid = 0; _players = 0;
-            _bestCA = -1; _bestCAidx = -1; _bestPA = -1; _bestPAidx = -1;
+            // 3) Live experiments.
+            L("----- live experiments -----");
+            Experiment();
 
-            int ctorOk = 0, ctorThrew = 0, readAllFalse = 0;
-            bool loggedFirst = false;
-            var detail = new List<string>();
-
-            for (int i = 0; i < ScanCount; i++)
-            {
-                PersonReference p;
-                try { p = new PersonReference(i); }
-                catch { ctorThrew++; continue; }
-                if (p == null) { ctorThrew++; continue; }
-                ctorOk++;
-
-                // One-time diagnostic on the first person we manage to build:
-                // does it even accept the CA property?
-                if (!loggedFirst)
-                {
-                    loggedFirst = true;
-                    string acc = "?";
-                    if (acceptsProp != null)
-                    {
-                        try { acc = (acceptsProp.Invoke(p, new object[] { PID_PlayerCA }) as bool?)?.ToString() ?? "?"; }
-                        catch (Exception e) { acc = "err:" + e.Message; }
-                    }
-                    L($"  probe person #{i}: AcceptsProperty(PlayerCA)={acc}");
-                }
-
-                int isP = ReadInt(tryGet, p, PID_IsPlayer, out bool okIsP);
-                int age = ReadInt(tryGet, p, PID_Age, out bool okAge);
-                int pca = ReadInt(tryGet, p, PID_PlayerCA, out bool okPCA);
-                int ppa = ReadInt(tryGet, p, PID_PlayerPA, out bool okPPA);
-                int nca = ReadInt(tryGet, p, PID_NonPlayerCA, out bool okNCA);
-
-                if (!(okIsP || okAge || okPCA || okPPA || okNCA))
-                {
-                    readAllFalse++;
-                    continue;
-                }
-
-                _scanned++;
-                if (okIsP && isP != 0) _players++;
-                _valid++;
-                if (okPCA && pca > _bestCA) { _bestCA = pca; _bestCAidx = i; }
-                if (okPPA && ppa > _bestPA) { _bestPA = ppa; _bestPAidx = i; }
-
-                if (detail.Count < 30)
-                    detail.Add($"  #{i} isPlayer={fmt(okIsP, isP)} age={fmt(okAge, age)} " +
-                               $"PlayerCA={fmt(okPCA, pca)} PlayerPA={fmt(okPPA, ppa)} NonPlayerCA={fmt(okNCA, nca)}");
-            }
-
-            if (_valid == 0)
-            {
-                // Not in a save yet (or wrong addressing) — log one concise line and keep retrying.
-                bool gameOk = false;
-                try { gameOk = GameReference.GetInstance() != null; } catch { }
-                L($"[FM26 Scout Mod] attempt #{_tries}: valid=0 " +
-                  $"(ctorOk={ctorOk}, ctorThrew={ctorThrew}, readsAllFalse={readAllFalse}, gameRef={gameOk}). " +
-                  $"Load a save if you haven't — will keep retrying.");
-                return;
-            }
-
-            // Success — dump the details once and stop retrying.
-            L($"===== FM26 Scout Mod: FIRST VALUE READ (v{Plugin.PluginVersion}) =====");
-            L($"  ctorOk={ctorOk} ctorThrew={ctorThrew} readsAllFalse={readAllFalse}");
-            foreach (var line in detail) L(line);
-            L($"----- summary: scanned={_scanned} valid={_valid} players={_players} " +
-              $"bestPlayerCA={_bestCA} @#{_bestCAidx}  bestPlayerPA={_bestPA} @#{_bestPAidx} -----");
-            L("===== FM26 Scout Mod: value read done =====");
+            L($"===== FM26 Scout Mod: fetch hunt done, {_lines} lines =====");
             _ran = true;
         }
         catch (Exception ex)
         {
-            Plugin.Logger.LogError($"[FM26 Scout Mod] read #{_tries} error: {ex}");
+            Plugin.Logger.LogError($"[FM26 Scout Mod] probe #{_tries} error: {ex}");
         }
     }
 
-    private static string fmt(bool ok, int v) => ok ? v.ToString() : "-";
+    private void Experiment()
+    {
+        MethodInfo tryGetValue = FindMethod2("TryGetValue");
+        MethodInfo tryGetProp = FindMethod2("TryGetProperty");
 
-    // TryGetValue is inherited from SI.Interop.InteropReference; GetMethods (no
-    // DeclaredOnly) includes it. We invoke via reflection so we don't depend on
-    // whether Il2CppInterop generated the byref param as `out` or `ref`.
-    private static MethodInfo FindTryGetValue()
+        // (a) freshly-built person #0
+        try
+        {
+            var p = new PersonReference(0);
+            L($"  new PersonReference(0): TryGetValue(CA)={Invoke2(tryGetValue, p)}  TryGetProperty(CA)={Invoke2(tryGetProp, p)}");
+        }
+        catch (Exception e) { L("  new PersonReference(0) err: " + e.Message); }
+
+        // (b) the "current" instance the UI may have bound
+        try
+        {
+            var inst = PersonReference.GetInstance();
+            if (inst == null) { L("  PersonReference.GetInstance() -> null"); }
+            else L($"  PersonReference.GetInstance(): id={SafeId(inst)}  TryGetValue(CA)={Invoke2(tryGetValue, inst)}  TryGetProperty(CA)={Invoke2(tryGetProp, inst)}");
+        }
+        catch (Exception e) { L("  PersonReference.GetInstance() err: " + e.Message); }
+    }
+
+    private static string SafeId(object refObj)
     {
         try
         {
-            foreach (var m in typeof(PersonReference).GetMethods())
-            {
-                if (m.Name != "TryGetValue") continue;
-                var ps = m.GetParameters();
-                if (ps.Length == 2 && ps[0].ParameterType == typeof(uint))
-                    return m;
-            }
+            var idProp = refObj.GetType().GetProperty("ID");
+            if (idProp == null) return "?";
+            var id = idProp.GetValue(refObj);
+            var inner = id?.GetType().GetProperty("ID");
+            return inner?.GetValue(id)?.ToString() ?? id?.ToString() ?? "?";
         }
-        catch { }
-        return null;
+        catch { return "?"; }
     }
 
-    // Find a single-uint-arg method by name on PersonReference (e.g. AcceptsProperty).
-    private static MethodInfo FindMethod(string name)
+    private static string Invoke2(MethodInfo m, object inst)
+    {
+        if (m == null) return "<no method>";
+        try
+        {
+            object[] args = { PID_PlayerCA, 0 };
+            object r = m.Invoke(inst, args);
+            bool ok = r is bool b && b;
+            return $"{ok} (val={args[1]})";
+        }
+        catch (Exception e) { return "err:" + e.Message; }
+    }
+
+    private static MethodInfo FindMethod2(string name)
     {
         try
         {
@@ -195,24 +157,65 @@ public class ScoutUI : MonoBehaviour
             {
                 if (m.Name != name) continue;
                 var ps = m.GetParameters();
-                if (ps.Length == 1 && ps[0].ParameterType == typeof(uint))
-                    return m;
+                if (ps.Length == 2 && ps[0].ParameterType == typeof(uint)) return m;
             }
         }
         catch { }
         return null;
     }
 
-    private static int ReadInt(MethodInfo m, object inst, uint id, out bool ok)
+    // Walk the base chain, dumping declared members at each level until we hit
+    // Object / the Il2CppInterop base (which only carry plumbing noise).
+    private void DumpChain(Type t)
     {
-        ok = false;
+        while (t != null)
+        {
+            string bn = t.BaseType?.Name ?? "";
+            if (t.Name == "Object" || t.Name == "Il2CppObjectBase") break;
+            DumpType(t);
+            if (bn == "Object" || bn == "Il2CppObjectBase" || bn == "") break;
+            t = t.BaseType;
+        }
+    }
+
+    private void DumpType(Type t)
+    {
         try
         {
-            object[] args = { id, 0 };
-            object r = m.Invoke(inst, args);
-            ok = r is bool b && b;
-            return args[1] is int v ? v : 0;
+            L($"  == {t.FullName}  (base: {t.BaseType?.Name ?? "?"}) ==");
+            const BindingFlags F = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
+            foreach (var c in Safe(() => t.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)))
+            {
+                var ps = c.GetParameters();
+                var sb = new StringBuilder("     .ctor(");
+                for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(Short(ps[i].ParameterType)).Append(' ').Append(ps[i].Name); }
+                L(sb.Append(')').ToString());
+            }
+            foreach (var m in Safe(() => t.GetMethods(F)))
+            {
+                if (m.Name.StartsWith("get__", StringComparison.Ordinal) || m.Name.StartsWith("set__", StringComparison.Ordinal)) continue;
+                if (m.Name.StartsWith("get_m_", StringComparison.Ordinal) || m.Name.StartsWith("set_m_", StringComparison.Ordinal)) continue;
+                L("     " + Sig(m));
+            }
+            foreach (var f in Safe(() => t.GetFields(F)))
+                L($"     field {Short(f.FieldType)} {f.Name}");
         }
-        catch { ok = false; return 0; }
+        catch (Exception e) { L($"  <dump err {t?.FullName}: {e.Message}>"); }
     }
+
+    private static T[] Safe<T>(Func<T[]> f) { try { return f() ?? Array.Empty<T>(); } catch { return Array.Empty<T>(); } }
+
+    private static string Sig(MethodInfo m)
+    {
+        var sb = new StringBuilder();
+        if (m.IsStatic) sb.Append("static ");
+        Type rt = null; try { rt = m.ReturnType; } catch { }
+        sb.Append(Short(rt)).Append(' ').Append(m.Name).Append('(');
+        var ps = Safe(() => m.GetParameters());
+        for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(Short(ps[i].ParameterType)).Append(' ').Append(ps[i].Name); }
+        return sb.Append(')').ToString();
+    }
+
+    private static string Short(Type t) => t?.Name ?? "?";
 }
