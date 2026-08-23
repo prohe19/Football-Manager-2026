@@ -12,11 +12,15 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>FM26ScoutMod</AssemblyName>
     <Product>FM26 Scout Mod</Product>
-    <Version>0.10.0</Version>
+    <Version>0.11.0</Version>
     <LangVersion>latest</LangVersion>
     <!-- Nullable reference types clash with the IL2CPP interop assemblies (CS0656), so keep off. -->
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- VS's fast up-to-date check can skip the whole build (and our DeployToGame
+         copy) when it thinks nothing changed - e.g. after deleting the deployed
+         DLL. Disable it so plain Build always runs MSBuild and re-deploys. -->
+    <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
     <!-- BepInEx packages live on the BepInEx NuGet feed, not just nuget.org -->
     <RestoreAdditionalProjectSources>
       https://api.nuget.org/v3/index.json;
