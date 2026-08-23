@@ -161,3 +161,37 @@ Root object confirmed too: `GameReference.GetInstance()` (a static singleton).
 So v0.7.0 scans person indices and reads IsPlayer / Age / CA / PA for each — the
 first real values out of the save. This is exactly how external tools read the
 DB, but from inside the running game.
+
+---
+
+## ⚠️ v0.7.1 / v0.8.0 result — `TryGetValue` is a cache, not a DB fetch
+
+Reading via `InteropReference.TryGetValue` does **not** work for attribute data:
+
+- `new PersonReference(index)` constructs fine (`ctorOk` for all indices) and
+  `AcceptsProperty(PlayerCA) = True` (the schema accepts CA)…
+- …but `TryGetValue(uint, out int)` returns **false for every property**, even on
+  `PersonReference.GetInstance()` (a real reference, id `1145176065`).
+
+The v0.8.0 base-chain dump explains why:
+
+```
+FM.UI.DatabaseRecordReference : SI.Interop.InteropReference
+    .ctor(DatabaseTableType type, Int32 index)   // identity = (table, packed index)
+    Int64 get_Data1()                            // native-side handle
+SI.Interop.InteropReference
+    bool TryGetValue(uint id, out int value)     // reads a LOCAL value cache
+    void SetValue(uint id, int value)            // native pushes values in here
+```
+
+`TryGetValue`/`SetValue` are a **small client-side cache** that FM26's binding
+system fills only for the values a screen is currently showing. The real
+attribute database lives in the native `game_plugin` (C++), and the managed UI
+reads it **lazily through the binding subsystem** (`SI.Bindable.Bindings`) via
+data handlers that fetch from native and `Set` the result into the binding tree.
+
+**Consequence:** there is no simple managed "read person X's CA" call. Bulk DB
+reads (Top-10-by-CA across everyone) require either driving the binding subsystem
+/ native fetch, or reading the save file / process memory the way Genie Scout
+does. Next: hunt for a live handle to the `Bindings` store (it already holds
+fetched values) and any method returning a typed value for a reference+property.

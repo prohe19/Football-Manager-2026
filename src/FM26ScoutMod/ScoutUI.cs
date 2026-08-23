@@ -3,44 +3,41 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
 using UnityEngine;
-using FM.UI;
 
 namespace FM26ScoutMod;
 
 /// <summary>
-/// Stage 2 (fetch hunt) — find how to FETCH a value, not just read the cache.
+/// Stage 2 (fetch hunt II) — find the live binding store and the real value read.
 ///
-/// v0.7.1 proved: new PersonReference(index) constructs fine and
-/// AcceptsProperty(PlayerCA)=True, but InteropReference.TryGetValue(uint,out int)
-/// returns false for every property. So TryGetValue reads a local value cache the
-/// binding system fills when the UI binds a reference — it is NOT a live DB fetch.
+/// v0.8.0 proved TryGetValue is only a client cache. FM26 reads attributes lazily
+/// through SI.Bindable.Bindings (data handlers fetch from the native game_plugin
+/// and Set the result into the binding tree). So this build hunts:
 ///
-/// This build dumps the COMPLETE callable surface of a person reference (walking
-/// the whole base chain: PersonReference -> DatabaseRecordReference ->
-/// InteropReference) plus the interop factories and SI.Core.Record, so we can see
-/// the real fetch/enumerate call. It also runs small live experiments (TryGetValue
-/// vs TryGetProperty, and PersonReference.GetInstance()) and logs the results.
+///   1. A live handle to the Bindings / BindingSubsystem singleton (static
+///      property/field/0-arg method returning it) — and, if found, reports how
+///      many live bindings it holds (DataSet count) + its root node.
+///   2. Any method that RETURNS a value for a reference/property — i.e. returns
+///      SI.Core.TypedValue, or is named Fetch/Query/GetPropertyValue/RequestData.
 ///
-/// See docs/binding-api-probe.md.
+/// One of these is the door to reading real player data. See binding-api-probe.md.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
     public ScoutUI(System.IntPtr ptr) : base(ptr) { }
 
-    private const uint PID_PlayerCA = 1346584898;
+    private static readonly string[] AsmFilters = { "SI.", "FM.", "Bindable" };
+    private static readonly string[] SingletonTypeNames = { "Bindings", "BindingSubsystem" };
+    private static readonly string[] FetchNameHints =
+    {
+        "GetPropertyValue", "Fetch", "Query", "RequestData", "ReadProperty",
+        "GetValueForProperty", "ResolveValue", "GetTypedValue",
+    };
 
     private bool _open = true;
     private bool _ran;
     private float _nextTry;
     private int _tries;
     private int _lines;
-
-    // Extra types (beyond the PersonReference chain) to dump declared members of.
-    private static readonly string[] ExtraDumps =
-    {
-        "DatabaseRecordReferenceFactory", "FMInteropReferenceFactory",
-        "IInteropReferenceFactory", "Record", "DynamicReference",
-    };
 
     private void OnGUI()
     {
@@ -56,8 +53,8 @@ public class ScoutUI : MonoBehaviour
             return;
 
         GUI.Box(new Rect(12, 48, 400, 150), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - hunting the value-fetch call");
-        GUI.Label(new Rect(24, 100, 380, 40), _ran ? $"DONE - dumped {_lines} lines.\nSee LogOutput.log." : $"probing... tries={_tries}");
+        GUI.Label(new Rect(24, 74, 380, 22), "Stage 2 - finding the live binding store");
+        GUI.Label(new Rect(24, 100, 380, 40), _ran ? $"DONE - {_lines} lines. See LogOutput.log." : $"probing... tries={_tries}");
     }
 
     private void L(string msg) { _lines++; Plugin.Logger.LogInfo(msg); }
@@ -67,31 +64,100 @@ public class ScoutUI : MonoBehaviour
         _tries++;
         try
         {
-            L($"===== FM26 Scout Mod: FETCH HUNT (v{Plugin.PluginVersion}) =====");
-
-            // 1) Full callable surface of a person reference, base chain included.
-            L("----- PersonReference inheritance chain (declared members per level) -----");
-            DumpChain(typeof(PersonReference));
-
-            // 2) A few related types (factories / Record) that might expose the fetch.
-            L("----- related types -----");
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var t in typeof(PersonReference).Assembly.GetTypes())
+            var types = new List<Type>();
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
             {
-                if (t?.Name != null && Array.IndexOf(ExtraDumps, t.Name) >= 0 && seen.Add(t.FullName))
-                    DumpType(t);
-            }
-            foreach (var t in typeof(SI.Interop.InteropReference).Assembly.GetTypes())
-            {
-                if (t?.Name != null && Array.IndexOf(ExtraDumps, t.Name) >= 0 && seen.Add(t.FullName))
-                    DumpType(t);
+                string nm = null; try { nm = a.GetName().Name; } catch { }
+                if (nm == null) continue;
+                bool keep = false;
+                foreach (var f in AsmFilters) if (nm.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0) { keep = true; break; }
+                if (!keep) continue;
+                foreach (var t in SafeTypes(a)) if (t != null) types.Add(t);
             }
 
-            // 3) Live experiments.
-            L("----- live experiments -----");
-            Experiment();
+            L($"===== FM26 Scout Mod: FETCH HUNT II (v{Plugin.PluginVersion}) =====");
+            L($"scanned {types.Count} types");
 
-            L($"===== FM26 Scout Mod: fetch hunt done, {_lines} lines =====");
+            // 1) Singleton sources for Bindings / BindingSubsystem.
+            L("----- singleton sources (static member -> Bindings/BindingSubsystem) -----");
+            object liveBindings = null;
+            string liveFrom = null;
+            const BindingFlags SF = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly;
+            foreach (var t in types)
+            {
+                foreach (var p in Safe(() => t.GetProperties(SF)))
+                {
+                    if (!IsSingletonType(p.PropertyType)) continue;
+                    L($"  PROP {t.FullName}.{p.Name} : {p.PropertyType.Name}");
+                    if (liveBindings == null) { liveBindings = TryGet(() => p.GetValue(null)); if (liveBindings != null) liveFrom = $"{t.Name}.{p.Name}"; }
+                }
+                foreach (var f in Safe(() => t.GetFields(SF)))
+                {
+                    if (!IsSingletonType(f.FieldType)) continue;
+                    L($"  FIELD {t.FullName}.{f.Name} : {f.FieldType.Name}");
+                    if (liveBindings == null) { liveBindings = TryGet(() => f.GetValue(null)); if (liveBindings != null) liveFrom = $"{t.Name}.{f.Name}"; }
+                }
+                foreach (var m in Safe(() => t.GetMethods(SF)))
+                {
+                    if (m.GetParameters().Length != 0) continue;
+                    Type rt = null; try { rt = m.ReturnType; } catch { }
+                    if (!IsSingletonType(rt)) continue;
+                    L($"  METHOD {t.FullName}.{m.Name}() : {rt.Name}");
+                    if (liveBindings == null) { liveBindings = TryGet(() => m.Invoke(null, null)); if (liveBindings != null) liveFrom = $"{t.Name}.{m.Name}()"; }
+                }
+            }
+
+            // If we got a live Bindings instance, report how much it holds.
+            if (liveBindings != null)
+            {
+                L($"  >>> LIVE Bindings obtained from {liveFrom} (type {liveBindings.GetType().Name})");
+                try
+                {
+                    var dsProp = liveBindings.GetType().GetProperty("DataSet");
+                    var ds = dsProp?.GetValue(liveBindings);
+                    var countProp = ds?.GetType().GetProperty("Count");
+                    var count = countProp?.GetValue(ds);
+                    L($"  >>> DataSet count = {count?.ToString() ?? "?"}");
+                }
+                catch (Exception e) { L("  DataSet read err: " + e.Message); }
+                try
+                {
+                    var rootProp = liveBindings.GetType().GetProperty("RootNode");
+                    var root = rootProp?.GetValue(liveBindings);
+                    L($"  >>> RootNode = {(root == null ? "null" : "present")}");
+                }
+                catch (Exception e) { L("  RootNode read err: " + e.Message); }
+            }
+            else
+            {
+                L("  (no live Bindings instance obtained from a static member)");
+            }
+
+            // 2) Methods that return a TypedValue, or are named like a fetch.
+            L("----- value-producing methods (return TypedValue, or fetch-named) -----");
+            int shown = 0;
+            foreach (var t in types)
+            {
+                MethodInfo[] ms;
+                try { ms = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly); }
+                catch { continue; }
+                foreach (var m in ms)
+                {
+                    string rn = null; try { rn = m.ReturnType?.Name; } catch { }
+                    bool retTyped = rn == "TypedValue";
+                    bool named = false;
+                    foreach (var h in FetchNameHints) if (m.Name.IndexOf(h, StringComparison.OrdinalIgnoreCase) >= 0) { named = true; break; }
+                    if (!retTyped && !named) continue;
+                    // keep the signal high: only in the binding/interop/UI namespaces
+                    string ns = t.Namespace ?? "";
+                    if (!(ns.StartsWith("SI.Bindable") || ns.StartsWith("SI.Interop") || ns.StartsWith("SI.Core") || ns.StartsWith("FM.UI")))
+                        continue;
+                    L($"  {t.FullName}.{Sig(m)}");
+                    if (++shown >= 120) { L("  ...(cap)"); goto done; }
+                }
+            }
+        done:
+            L($"===== FM26 Scout Mod: fetch hunt II done, {_lines} lines =====");
             _ran = true;
         }
         catch (Exception ex)
@@ -100,122 +166,32 @@ public class ScoutUI : MonoBehaviour
         }
     }
 
-    private void Experiment()
+    private static bool IsSingletonType(Type t)
     {
-        MethodInfo tryGetValue = FindMethod2("TryGetValue");
-        MethodInfo tryGetProp = FindMethod2("TryGetProperty");
-
-        // (a) freshly-built person #0
-        try
-        {
-            var p = new PersonReference(0);
-            L($"  new PersonReference(0): TryGetValue(CA)={Invoke2(tryGetValue, p)}  TryGetProperty(CA)={Invoke2(tryGetProp, p)}");
-        }
-        catch (Exception e) { L("  new PersonReference(0) err: " + e.Message); }
-
-        // (b) the "current" instance the UI may have bound
-        try
-        {
-            var inst = PersonReference.GetInstance();
-            if (inst == null) { L("  PersonReference.GetInstance() -> null"); }
-            else L($"  PersonReference.GetInstance(): id={SafeId(inst)}  TryGetValue(CA)={Invoke2(tryGetValue, inst)}  TryGetProperty(CA)={Invoke2(tryGetProp, inst)}");
-        }
-        catch (Exception e) { L("  PersonReference.GetInstance() err: " + e.Message); }
+        if (t == null) return false;
+        foreach (var n in SingletonTypeNames) if (t.Name == n) return true;
+        return false;
     }
 
-    private static string SafeId(object refObj)
-    {
-        try
-        {
-            var idProp = refObj.GetType().GetProperty("ID");
-            if (idProp == null) return "?";
-            var id = idProp.GetValue(refObj);
-            var inner = id?.GetType().GetProperty("ID");
-            return inner?.GetValue(id)?.ToString() ?? id?.ToString() ?? "?";
-        }
-        catch { return "?"; }
-    }
-
-    private static string Invoke2(MethodInfo m, object inst)
-    {
-        if (m == null) return "<no method>";
-        try
-        {
-            object[] args = { PID_PlayerCA, 0 };
-            object r = m.Invoke(inst, args);
-            bool ok = r is bool b && b;
-            return $"{ok} (val={args[1]})";
-        }
-        catch (Exception e) { return "err:" + e.Message; }
-    }
-
-    private static MethodInfo FindMethod2(string name)
-    {
-        try
-        {
-            foreach (var m in typeof(PersonReference).GetMethods())
-            {
-                if (m.Name != name) continue;
-                var ps = m.GetParameters();
-                if (ps.Length == 2 && ps[0].ParameterType == typeof(uint)) return m;
-            }
-        }
-        catch { }
-        return null;
-    }
-
-    // Walk the base chain, dumping declared members at each level until we hit
-    // Object / the Il2CppInterop base (which only carry plumbing noise).
-    private void DumpChain(Type t)
-    {
-        while (t != null)
-        {
-            string bn = t.BaseType?.Name ?? "";
-            if (t.Name == "Object" || t.Name == "Il2CppObjectBase") break;
-            DumpType(t);
-            if (bn == "Object" || bn == "Il2CppObjectBase" || bn == "") break;
-            t = t.BaseType;
-        }
-    }
-
-    private void DumpType(Type t)
-    {
-        try
-        {
-            L($"  == {t.FullName}  (base: {t.BaseType?.Name ?? "?"}) ==");
-            const BindingFlags F = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
-
-            foreach (var c in Safe(() => t.GetConstructors(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)))
-            {
-                var ps = c.GetParameters();
-                var sb = new StringBuilder("     .ctor(");
-                for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(Short(ps[i].ParameterType)).Append(' ').Append(ps[i].Name); }
-                L(sb.Append(')').ToString());
-            }
-            foreach (var m in Safe(() => t.GetMethods(F)))
-            {
-                if (m.Name.StartsWith("get__", StringComparison.Ordinal) || m.Name.StartsWith("set__", StringComparison.Ordinal)) continue;
-                if (m.Name.StartsWith("get_m_", StringComparison.Ordinal) || m.Name.StartsWith("set_m_", StringComparison.Ordinal)) continue;
-                L("     " + Sig(m));
-            }
-            foreach (var f in Safe(() => t.GetFields(F)))
-                L($"     field {Short(f.FieldType)} {f.Name}");
-        }
-        catch (Exception e) { L($"  <dump err {t?.FullName}: {e.Message}>"); }
-    }
-
-    private static T[] Safe<T>(Func<T[]> f) { try { return f() ?? Array.Empty<T>(); } catch { return Array.Empty<T>(); } }
+    private static object TryGet(Func<object> f) { try { return f(); } catch { return null; } }
 
     private static string Sig(MethodInfo m)
     {
         var sb = new StringBuilder();
         if (m.IsStatic) sb.Append("static ");
         Type rt = null; try { rt = m.ReturnType; } catch { }
-        sb.Append(Short(rt)).Append(' ').Append(m.Name).Append('(');
+        sb.Append(rt?.Name ?? "?").Append(' ').Append(m.Name).Append('(');
         var ps = Safe(() => m.GetParameters());
-        for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(Short(ps[i].ParameterType)).Append(' ').Append(ps[i].Name); }
+        for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(ps[i].ParameterType?.Name ?? "?").Append(' ').Append(ps[i].Name); }
         return sb.Append(')').ToString();
     }
 
-    private static string Short(Type t) => t?.Name ?? "?";
+    private static T[] Safe<T>(Func<T[]> f) { try { return f() ?? Array.Empty<T>(); } catch { return Array.Empty<T>(); } }
+
+    private static IEnumerable<Type> SafeTypes(Assembly a)
+    {
+        try { return a.GetTypes(); }
+        catch (ReflectionTypeLoadException ex) { return ex.Types ?? Array.Empty<Type>(); }
+        catch { return Array.Empty<Type>(); }
+    }
 }
