@@ -20,7 +20,7 @@ public class Plugin : BasePlugin
 {
     public const string PluginGuid = "com.prohe19.fm26scoutmod";
     public const string PluginName = "FM26 Scout Mod";
-    public const string PluginVersion = "0.11.0";
+    public const string PluginVersion = "0.12.0";
 
     /// <summary>Shared logger so other files can log once we grow past Stage 0.</summary>
     internal static ManualLogSource Logger;

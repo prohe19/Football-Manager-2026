@@ -240,3 +240,45 @@ come from the managed/binding layer.** It requires reading the database directly
 What we *have* firmly delivered: BepInEx injection + in-game IMGUI overlay, and a
 complete, reproducible map of FM26's property schema (see property-ids.md). Those
 are solid foundations regardless of which data-read path we choose next.
+
+---
+
+## ✅ v0.10–0.11 breakthrough — the tree is readable after all
+
+The v0.9.x "dead end" was the wrong entry point, not a wall. Going through
+`Bindings.m_nodes` (a `Dictionary<ulong, Bindings+Node>`) instead of `DataSet`,
+and decoding each hash with `Bindings.GetPathDebug(new Key(hash))`, the whole
+live binding tree comes out with **readable paths**. The v0.11.0 spy captured
+9,500+ nodes across portal → squad → player profile → search:
+
+- **Per-player squad rows**: `…playertable3.Items.N.binding.Age` (PropID
+  825565216), plus `CurrentAbilityStars`, `CurrentAbilityStarRange` /
+  `PotentialAbilityStarRange` (and `Coach…` variants for staff).
+- **Player profile**: a full `PlayerAttributesBlock` with `AttributeValues`
+  nodes and per-attribute `PropertyValue` (1886680684) — the actual 1–20
+  attribute numbers flow through here.
+- **Scouting**: `ScoutedCurrentAbilityInfo` / `ScoutedPotentialAbilityInfo`
+  with a `StarRange` child.
+- **The bulk engine**: `game.Search` is a live `SearchReference` with
+  `Results`, `PersonList`, `SearchIsFinished`, `Clubs/Nations/Competitions` —
+  the game's own player-search query, addressable from code. `Team.FilteredPlayers`
+  exists too. This is the road to Genie-Scout-style bulk lists.
+
+New PropertyIDs observed live: CurrentAbilityStarRange=1131757922,
+PotentialAbilityStarRange=1349468514, CoachCurrentAbilityStarRange=1128481106,
+CoachPotentialAbilityStarRange=1129333074, AttributeValues=1112556614,
+PropertyValue=1886680684, ScoutedCurrentAbilityInfo=2036486263,
+ScoutedPotentialAbilityInfo=1399683185, StarRange=1464367445.
+
+### The one bug: TypedValue payload extraction (fixed in v0.12)
+
+Every node's `Value` is an `SI.Core.TypedValue`, but v0.11 printed only
+`get_IsAlive=True | get_IsPooled=False`. Cause: `TypedValue` exposes only flag
+**properties** non-generically (`IsAlive`, `IsPooled`, `IsNull`, `DataType`,
+`IsValueType`) — the payload accessor must be a **generic `Get<T>()`-style
+method**, which v0.11's heuristic explicitly skipped (`IsGenericMethod` filter).
+`DataType` does report the real payload type (`[Int32]`, `[String]`,
+`[Boolean]`, `[ClubReference]`…), so v0.12 binds each 1-type-arg generic method
+to the CLR type matching `DataType` and invokes it (fallbacks: TryGet-style out
+params, static conversion operators, `Il2CppSystem.Object`). The first accessor
+that works per data type is cached and logged as `>>> extractor found:`.
