@@ -436,3 +436,18 @@ across sessions (browse once, keep forever; values refresh when re-browsed).
 Plus F10 (cycle position filter) / F11 (U21 toggle) keyboard fallbacks, and
 the empty-list message now says how many scouted players lack position/age
 and which screens fill them in.
+
+### v0.29 field report + Genie Scout benchmark → v0.30
+
+v0.29 in-game: 53/53 joined, positions captured, first persistence run (DB
+file created). User benchmarked FM Genie Scout on the same save: Top-15 by
+rating/potential across ALL 41,299 players, exact CA/PA numbers (0–200),
+nation/club/wage/value columns, bargain finder. The gap to close is bulk
+coverage + exact values; our edge is being live and in-game.
+
+**v0.30:** (1) assembly scan — one-time reflection sweep over every FM./SI.
+managed assembly for methods taking a `PersonReference` (flagging those that
+also take a property identifier) — hunting the direct (person, property) read
+primitive that would give whole-database coverage without the UI;
+(2) weekly-wage capture (propID 1364088387, display + raw number map) as a
+new persisted column in the Top lists; (3) panel widened for the wage column.

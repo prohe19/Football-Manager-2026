@@ -69,6 +69,7 @@ public class ScoutUI : MonoBehaviour
         { 1885696627u, "Person" },
         { 1230661448u, "PlayerIndex" },
         { 1767075437u, "InitialSurname" },
+        { 1364088387u, "ContextContractWeeklyWage" },
     };
 
     // Subset of KnownProps that always deserves a "!!!" line. (Name/Search etc.
@@ -90,6 +91,49 @@ public class ScoutUI : MonoBehaviour
     private readonly HashSet<ulong> _seen = new();
     private readonly HashSet<ulong> _refNodes = new();   // nodes seen holding a PersonReference
     private bool _bindingsApiDumped;
+    private bool _asmScanned;
+
+    // Scan the game's managed assemblies for methods that accept a
+    // PersonReference — candidates for reading person data without the UI.
+    private void ScanAssembliesForPersonApis()
+    {
+        int printed = 0;
+        L("===== assembly scan: methods taking PersonReference =====");
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            string an = asm.GetName().Name ?? "";
+            if (!an.StartsWith("FM.", StringComparison.Ordinal) &&
+                !an.StartsWith("SI.", StringComparison.Ordinal)) continue;
+            Type[] types;
+            try { types = asm.GetTypes(); } catch { continue; }
+            foreach (var t in types)
+            {
+                MethodInfo[] methods;
+                try { methods = t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static); }
+                catch { continue; }
+                foreach (var m in methods)
+                {
+                    ParameterInfo[] ps;
+                    try { ps = m.GetParameters(); } catch { continue; }
+                    bool hasPerson = false, hasProp = false;
+                    foreach (var p in ps)
+                    {
+                        string pn = p.ParameterType.Name;
+                        if (pn.Contains("PersonReference")) hasPerson = true;
+                        if (pn.Contains("PropertyIdentifier") || pn.Contains("PropID") || pn.Contains("PropertyID")) hasProp = true;
+                    }
+                    if (!hasPerson) continue;
+                    // property-taking overloads are the gold — print them first-class;
+                    // everything else only while we have budget
+                    if (!hasProp && printed > 150) continue;
+                    var sig = string.Join(", ", Array.ConvertAll(ps, p => p.ParameterType.Name));
+                    L($"{(hasProp ? "!!! " : "    ")}{an}::{t.Name}.{m.Name}({sig}) -> {m.ReturnType.Name}");
+                    if (++printed >= 220) { L("    ...(scan truncated)"); return; }
+                }
+            }
+        }
+        L($"===== end assembly scan ({printed} methods) =====");
+    }
 
     // ---- TypedValue extraction state ----
     private bool _tvApiDumped;
@@ -102,7 +146,7 @@ public class ScoutUI : MonoBehaviour
     private float _panelH = 240;
     private bool _dragging;
     private Vector2 _dragOff;
-    private const float PanelW = 500;
+    private const float PanelW = 560;
 
     private void OnGUI()
     {
@@ -238,7 +282,7 @@ public class ScoutUI : MonoBehaviour
         GUI.Label(new Rect(x, y, PanelW - 20, 20),
             (byPa ? "TOP POTENTIAL (wonderkids)" : "TOP CURRENT ABILITY") + $"  -  {list.Count} match");
         y += 22;
-        GUI.Label(new Rect(x, y, PanelW - 20, 20), "name                          pos      age    CA      PA");
+        GUI.Label(new Rect(x, y, PanelW - 20, 20), "name                          pos      age   CA      PA      wage");
         y += 20;
 
         int shown = Math.Min(15, list.Count);
@@ -249,8 +293,10 @@ public class ScoutUI : MonoBehaviour
             if (nm.Length > 26) nm = nm.Substring(0, 26);
             string pos = r.Position ?? "?";
             if (pos.Length > 8) pos = pos.Substring(0, 8);
+            string wage = r.Wage ?? "";
+            if (wage.Length > 14) wage = wage.Substring(0, 14);
             GUI.Label(new Rect(x, y + i * 20, PanelW - 20, 20),
-                $"{i + 1,2}. {nm,-26} {pos,-8} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-7} {Stars(r.PaMin, r.PaMax)}");
+                $"{i + 1,2}. {nm,-26} {pos,-8} {(r.Age > 0 ? r.Age.ToString() : "?"),3}  {Stars(r.CaMin, r.CaMax),-7} {Stars(r.PaMin, r.PaMax),-7} {wage}");
         }
         if (shown == 0)
         {
@@ -305,6 +351,18 @@ public class ScoutUI : MonoBehaviour
             bool verbose = _snapshots <= MaxSnapshots;
             if (verbose)
                 L($"===== FM26 Scout Mod: TREE SPY pass {_snapshots}/{MaxSnapshots} (v{Plugin.PluginVersion}) — nodes={count}, new below =====");
+
+            // One-time hunt for the direct read primitive: any managed method
+            // anywhere in the game's FM./SI. assemblies that takes a
+            // PersonReference (and ideally a property identifier) is a candidate
+            // for reading (person, property) values WITHOUT the UI — the key to
+            // Genie-Scout-level whole-database coverage.
+            if (!_asmScanned && _snapshots >= 3)
+            {
+                _asmScanned = true;
+                try { ScanAssembliesForPersonApis(); }
+                catch (Exception e3) { L("assembly scan failed: " + e3.Message); }
+            }
 
             // One-time dump of the binding system's own API — the map for driving
             // it directly (create bindings / run game.Search ourselves) later.
@@ -503,6 +561,7 @@ public class ScoutUI : MonoBehaviour
         public bool IdxStrong;   // index came from the row's own binding / PlayerIndex
         public bool NameStrong;  // name came from a tooltip / a Name-family prop
         public string Position;  // position string cell, e.g. "ST (C)", "D/WB (R)"
+        public string Wage;      // weekly wage display, e.g. "€250K - €300K p/w"
         public Dictionary<string, string> Cells;   // string cells seen (diagnostics)
 
         // Best display name we have for this record.
@@ -534,6 +593,7 @@ public class ScoutUI : MonoBehaviour
         1230661448u,  // PlayerIndex (table row → DB person index)
         1767075437u,  // InitialSurname (star tables' name cell)
         1349481321u,  // Position
+        1364088387u,  // ContextContractWeeklyWage
         844321568u, 1131757922u, 1128481106u,  // CA stars / ranges (+coach)
         1480150644u, 1349468514u, 1129333074u, // PA stars / ranges (+coach)
     };
@@ -634,6 +694,9 @@ public class ScoutUI : MonoBehaviour
                 break;
             case 1349481321u:  // Position
                 { var ps2 = ParseDisplayString(val); if (LooksLikePosition(ps2)) row.Position = ps2; }
+                break;
+            case 1364088387u:  // ContextContractWeeklyWage — display + raw number map
+                { var w = FindMapString(val, "1903577654"); if (w != null) row.Wage = w; }
                 break;
             // NOTE: UniqueId (1970170212) is deliberately NOT used as the join key —
             // it may be a different numbering than PersonReference.m_index, and a
@@ -746,6 +809,7 @@ public class ScoutUI : MonoBehaviour
                 if (f[4].Length > 0) p.Position = f[4];
                 int.TryParse(f[5], out p.CaMin); int.TryParse(f[6], out p.CaMax);
                 int.TryParse(f[7], out p.PaMin); int.TryParse(f[8], out p.PaMax);
+                if (f.Length > 9 && f[9].Length > 0) p.Wage = f[9];
                 _persons[idx] = p;
             }
             L($"scout DB loaded: {_persons.Count} players from {DbPath}");
@@ -765,7 +829,8 @@ public class ScoutUI : MonoBehaviour
                   .Append(p.Name ?? "").Append('\t').Append(p.NameStrong ? '1' : '0').Append('\t')
                   .Append(p.Age).Append('\t').Append(p.Position ?? "").Append('\t')
                   .Append(p.CaMin).Append('\t').Append(p.CaMax).Append('\t')
-                  .Append(p.PaMin).Append('\t').Append(p.PaMax).Append('\n');
+                  .Append(p.PaMin).Append('\t').Append(p.PaMax).Append('\t')
+                  .Append(p.Wage ?? "").Append('\n');
             }
             System.IO.File.WriteAllText(DbPath, sb.ToString());
         }
@@ -796,6 +861,7 @@ public class ScoutUI : MonoBehaviour
         }
         if (row.Age > 0 && p.Age != row.Age) { p.Age = row.Age; _dbDirty = true; }
         if (row.Position != null && p.Position != row.Position) { p.Position = row.Position; _dbDirty = true; }
+        if (row.Wage != null && p.Wage != row.Wage) { p.Wage = row.Wage; _dbDirty = true; }
         if (row.CaMax > 0 && (p.CaMin != row.CaMin || p.CaMax != row.CaMax))
         { p.CaMin = row.CaMin; p.CaMax = row.CaMax; _dbDirty = true; }
         if (row.PaMax > 0 && (p.PaMin != row.PaMin || p.PaMax != row.PaMax))
@@ -814,6 +880,19 @@ public class ScoutUI : MonoBehaviour
         max = FindMapInt(v, "1298233430");   // MaxValue
         min = FindMapInt(v, "1298755158");   // MinValue
         return max >= 0;
+    }
+
+    private static string FindMapString(string v, string key)
+    {
+        string marker = key + "=[String] ";
+        int i = v.IndexOf(marker, StringComparison.Ordinal);
+        if (i < 0) return null;
+        i += marker.Length;
+        int j = v.IndexOf(", 1", i, StringComparison.Ordinal);   // next numeric map key
+        if (j < 0) j = v.IndexOf(']', i);
+        if (j < 0) j = v.Length;
+        string s = v.Substring(i, j - i).Trim();
+        return s.Length > 0 && s.Length < 40 ? s : null;
     }
 
     private static int FindMapInt(string v, string key)
