@@ -299,3 +299,37 @@ and we only printed their useless `ToString`. v0.13 drills one level deeper:
 `DataType` is a *managed* `System.Type`, so we bind `As<RealType>` to get the
 correctly-typed wrapper, dump each wrapper type's API once, and invoke its
 no-arg primitive getters (lists: print count + first items).
+
+### ✅ v0.22 log analysis — why Top PA/CA stayed empty, and the join key (→ v0.23)
+
+The v0.22 log (`rows=260, named=86, CA=19, PA=9`, both lists empty) proved the
+capture pipeline works but the **names and star ratings land on different
+rows**:
+
+- **Names** come from streamed lists (`…2B.1.3.items0.N` — squad side list,
+  medical centre, …): `name=Mile Svilar … ca=-1 pa=-1 idx=-1`. No stars, no index.
+- **Star ranges + Age** come from the squad **playertable**
+  (`…AA.…playertable3.Items.N.…`) and YouthSetup `StreamedTable3.Items.N` —
+  which have **no Name node at all**.
+- The old display filter demanded `Name != null && stars > 0` on the *same*
+  row → intersection empty → "0 scouted" forever.
+
+**The join key discovered in the same log:** each playertable row has
+`Items.N.2.PlayerIndex` (propID **1230661448**) = a `DynamicNumber` holding the
+person's **DB index** — the log showed `PlayerIndex … 40087` matching
+`get_m_index=40087` inside `GameStateCache25.Manager.Club.MainTeam.Players`.
+Player profile pages carry the same index as a `PersonReference` binding
+(`…B3.…BindingVariables4.7.binding → get_m_index=39505` = Malo Gusto).
+
+Also confirmed: profile **RoleTable** rows carry per-ROLE star ranges under
+propID-0 `binding` nodes (harmless — we only capture star props by node propID).
+
+**v0.23 therefore:**
+1. captures `PlayerIndex` (1230661448) + `FirstName`/`SecondName` per row,
+2. merges rows into a **person-level shadow DB keyed by DB index** at the end
+   of each pass (end-of-pass, so recycled rows can't donate values to their
+   previous occupant),
+3. adds page pseudo-rows (32-hex screen roots) so an open player profile joins
+   name+index+stars in one record,
+4. Top PA/CA sort the person DB and show `player #<idx>` placeholders when the
+   name hasn't been seen yet — the lists are never silently empty again.

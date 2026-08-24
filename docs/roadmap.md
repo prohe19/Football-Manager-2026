@@ -69,11 +69,12 @@ Either way the UI is the same: one in-game button/hotkey → a large overlay
 
 ---
 
-## Stage 3 — First real feature: Top Players by CA ⬅️ **we are here (v0.20)**
+## Stage 3 — First real feature: Top Players by CA ⬅️ **we are here (v0.23)**
 
 **Goal:** The headline feature.
 
-- [ ] Find the **Current Ability (CA)** field on a player
+- [x] Find the **Current Ability (CA)** field on a player — **star ranges captured live from squad/search tables (v0.21)**
+- [x] Join names ↔ ratings — **v0.23: person-level DB keyed by the row's `PlayerIndex` (propID 1230661448) = DB person index; names, age and stars from different tables merge into one record**
 - [ ] Rank all players by CA (via `game.Search` / Option A)
 - [ ] Show **Top 10** in the panel, with a **position filter**
 

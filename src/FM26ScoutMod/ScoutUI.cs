@@ -67,6 +67,7 @@ public class ScoutUI : MonoBehaviour
         { 1851878757u, "Name" },
         { 1886157170u, "Player" },
         { 1885696627u, "Person" },
+        { 1230661448u, "PlayerIndex" },
     };
 
     // Subset of KnownProps that always deserves a "!!!" line. (Name/Search etc.
@@ -148,10 +149,10 @@ public class ScoutUI : MonoBehaviour
 
         if (_view == 0)
         {
-            GUI.Label(new Rect(x, y, PanelW - 20, 22), $"Shadow scouting DB: {_rows.Count} rows captured");
-            GUI.Label(new Rect(x, y + 24, PanelW - 20, 44), $"passes: {_snapshots}   nodes: {_lastNodeCount}\n{_status}");
-            GUI.Label(new Rect(x, y + 72, PanelW - 20, 60), "Browse SQUADS and PLAYER SEARCH results - every row\nthe game shows is captured (name, age, CA/PA stars).\nThen open Top PA / Top CA (buttons or F8/F9).");
-            _panelH = y + 140 - panel.y;
+            GUI.Label(new Rect(x, y, PanelW - 20, 22), $"Shadow scouting DB: {_rows.Count} rows / {_persons.Count} players");
+            GUI.Label(new Rect(x, y + 24, PanelW - 20, 64), $"passes: {_snapshots}   nodes: {_lastNodeCount}\n{_status}");
+            GUI.Label(new Rect(x, y + 92, PanelW - 20, 60), "Browse SQUADS and PLAYER SEARCH results - every row\nthe game shows is captured (name, age, CA/PA stars).\nThen open Top PA / Top CA (buttons or F8/F9).");
+            _panelH = y + 160 - panel.y;
         }
         else
         {
@@ -166,9 +167,15 @@ public class ScoutUI : MonoBehaviour
 
     private float DrawTopList(bool byPa, float x, float y, float panelTop)
     {
+        // Merged per-person records first; raw rows only when they never learned
+        // their person index (so we don't show the same player twice). A missing
+        // name no longer hides a scouted player — we show a placeholder instead.
         var list = new List<ScoutRow>();
+        foreach (var p in _persons.Values)
+            if (byPa ? p.PaMax > 0 : p.CaMax > 0)
+                list.Add(p);
         foreach (var r in _rows.Values)
-            if (r.Name != null && (byPa ? r.PaMax > 0 : r.CaMax > 0))
+            if (r.PersonIndex <= 0 && (byPa ? r.PaMax > 0 : r.CaMax > 0))
                 list.Add(r);
         list.Sort((a, b) =>
         {
@@ -187,7 +194,8 @@ public class ScoutUI : MonoBehaviour
         for (int i = 0; i < shown; i++)
         {
             var r = list[i];
-            string nm = r.Name.Length > 28 ? r.Name.Substring(0, 28) : r.Name;
+            string nm = r.AnyName ?? (r.PersonIndex > 0 ? $"player #{r.PersonIndex}" : "(name not seen yet)");
+            if (nm.Length > 28) nm = nm.Substring(0, 28);
             GUI.Label(new Rect(x, y + i * 20, PanelW - 20, 20),
                 $"{i + 1,2}. {nm,-28} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-8} {Stars(r.PaMin, r.PaMax)}");
         }
@@ -288,28 +296,57 @@ public class ScoutUI : MonoBehaviour
                 else if (printed < MaxColdLinesPerPass) { printed++; L(line); }
             }
 
+            // Merge rows into per-person records only after the whole pass, when
+            // every recycled row has re-learned its current person index — merging
+            // mid-pass could attribute a row's new values to its previous occupant.
+            foreach (var r in _rows.Values)
+                if (r.PersonIndex > 0)
+                    MergePerson(r);
+
             int named = 0, withCa = 0, withPa = 0;
             foreach (var r in _rows.Values)
             {
-                if (r.Name != null) named++;
+                if (r.AnyName != null) named++;
                 if (r.CaMax > 0) withCa++;
                 if (r.PaMax > 0) withPa++;
             }
+            int joined = 0, pCa = 0;
+            foreach (var p in _persons.Values)
+            {
+                if (p.CaMax > 0 || p.PaMax > 0) pCa++;
+                if (p.Name != null && (p.CaMax > 0 || p.PaMax > 0)) joined++;
+            }
             if (verbose || _snapshots % 6 == 0)
             {
-                L($"----- pass {_snapshots}: new={added}, printed={printed}, HOT={hot}, scoutRows={_rows.Count} (named={named} ca={withCa} pa={withPa}) -----");
+                L($"----- pass {_snapshots}: new={added}, printed={printed}, HOT={hot}, scoutRows={_rows.Count} (named={named} ca={withCa} pa={withPa}) persons={_persons.Count} (starred={pCa} joined={joined}) -----");
+                // Starred rows first — those are the ones whose join we are debugging.
                 int dumped = 0;
                 foreach (var kvp in _rows)
                 {
                     var r = kvp.Value;
-                    if (r.Name == null && r.CaMax <= 0) continue;
-                    L($"      sample row: name={r.Name ?? "?"} age={r.Age} ca={r.CaMin}-{r.CaMax} pa={r.PaMin}-{r.PaMax} idx={r.PersonIndex} key={Trunc(kvp.Key)}");
+                    if (r.CaMax <= 0 && r.PaMax <= 0) continue;
+                    L($"      starred row: name={r.AnyName ?? "?"} age={r.Age} ca={r.CaMin}-{r.CaMax} pa={r.PaMin}-{r.PaMax} idx={r.PersonIndex} key={Trunc(kvp.Key)}");
+                    if (++dumped >= 3) break;
+                }
+                dumped = 0;
+                foreach (var kvp in _rows)
+                {
+                    var r = kvp.Value;
+                    if (r.AnyName == null || r.CaMax > 0 || r.PaMax > 0) continue;
+                    L($"      named row:   name={r.AnyName} age={r.Age} idx={r.PersonIndex} key={Trunc(kvp.Key)}");
+                    if (++dumped >= 3) break;
+                }
+                dumped = 0;
+                foreach (var kvp in _persons)
+                {
+                    var p = kvp.Value;
+                    L($"      person: idx={kvp.Key} name={p.Name ?? "?"} age={p.Age} ca={p.CaMin}-{p.CaMax} pa={p.PaMin}-{p.PaMax}");
                     if (++dumped >= 3) break;
                 }
                 if (verbose && _snapshots == MaxSnapshots)
                     LogWinnerSummary();
             }
-            _status = $"pass {_snapshots}: rows={_rows.Count}, named={named}, CA={withCa}, PA={withPa}";
+            _status = $"pass {_snapshots}: rows={_rows.Count}, named={named}, CA={withCa}, PA={withPa}\npersons={_persons.Count}, with stars={pCa}, joined (name+stars)={joined}";
         }
         catch (Exception ex)
         {
@@ -326,17 +363,25 @@ public class ScoutUI : MonoBehaviour
     private class ScoutRow
     {
         public string Name;
+        public string FirstName, SecondName;
         public int Age = -1;
         public int CaMin = -1, CaMax = -1;
         public int PaMin = -1, PaMax = -1;
         public int PersonIndex = -1;
+
+        // Best display name we have for this record.
+        public string AnyName =>
+            Name ?? (SecondName == null ? null
+                   : FirstName == null ? SecondName : FirstName + " " + SecondName);
     }
 
     private static readonly HashSet<uint> CapturedProps = new()
     {
         825565216u,   // Age
         1851878757u,  // Name
-        1970170212u,  // UniqueId
+        1718186862u,  // FirstName
+        1936024430u,  // SecondName
+        1230661448u,  // PlayerIndex (table row → DB person index)
         844321568u, 1131757922u, 1128481106u,  // CA stars / ranges (+coach)
         1480150644u, 1349468514u, 1129333074u, // PA stars / ranges (+coach)
     };
@@ -368,11 +413,33 @@ public class ScoutUI : MonoBehaviour
         return null;
     }
 
+    // Content pages (player profile etc.) have a 32-hex root segment and no
+    // ".Items." rows for the page's own person — group their screen-level nodes
+    // into one pseudo-row, so opening a profile joins name + stars + index.
+    private static string PageKey(string path)
+    {
+        int d = path.IndexOf('.');
+        if (d < 24) return null;
+        int hex = 0;
+        for (int i = 0; i < d; i++)
+        {
+            char c = path[i];
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) hex++;
+        }
+        return hex >= 24 ? path.Substring(0, d) : null;
+    }
+
     private void Capture(string path, string nodeName, uint propId, string val)
     {
         if (path == null || val == null) return;
         string key = RowKey(path);
-        if (key == null) return;
+        bool pageRow = false;
+        if (key == null)
+        {
+            key = PageKey(path);
+            if (key == null) return;
+            pageRow = true;
+        }
 
         if (!_rows.TryGetValue(key, out var row))
         {
@@ -395,6 +462,10 @@ public class ScoutUI : MonoBehaviour
                                // Judge only the path AFTER the row key ("Team"
                                // in "FirstTeamC" earlier in the path must not
                                // disqualify the player's own name).
+                               // Page pseudo-rows carry too many unrelated Name
+                               // nodes (attribute names, ban notices) — for those
+                               // we trust only FirstName/SecondName.
+                if (pageRow) break;
                 string tail = path.Length > key.Length ? path.Substring(key.Length) : "";
                 if (!Has(tail, "Team") && !Has(tail, "Club") && !Has(tail, "Nation") && !Has(tail, "Competition"))
                 {
@@ -402,8 +473,18 @@ public class ScoutUI : MonoBehaviour
                     if (n != null && (row.Name == null || n.Length > row.Name.Length)) row.Name = n;
                 }
                 break;
-            case 1970170212u:  // UniqueId
-                if (TryParseTagged(val, "DynamicNumber", out int uid)) row.PersonIndex = uid;
+            case 1718186862u:  // FirstName
+                { var f = ParseDisplayString(val); if (f != null) row.FirstName = f; }
+                break;
+            case 1936024430u:  // SecondName
+                { var s2 = ParseDisplayString(val); if (s2 != null) row.SecondName = s2; }
+                break;
+            // NOTE: UniqueId (1970170212) is deliberately NOT used as the join key —
+            // it may be a different numbering than PersonReference.m_index, and a
+            // mixed-scheme join would merge two different people.
+            case 1230661448u:  // PlayerIndex — the row's DB person index; our join key
+                if (TryParseTagged(val, "DynamicNumber", out int pidx) && pidx > 0)
+                    SetRowIndex(key, ref row, pidx);
                 break;
         }
 
@@ -415,18 +496,39 @@ public class ScoutUI : MonoBehaviour
                 int j = k + 12, e = j;
                 while (e < val.Length && char.IsDigit(val[e])) e++;
                 if (e > j && int.TryParse(val.Substring(j, e - j), out int idx))
-                {
-                    if (row.PersonIndex > 0 && row.PersonIndex != idx)
-                    {
-                        // the game recycled this table row for another player —
-                        // start fresh instead of mixing two people's data
-                        row = new ScoutRow();
-                        _rows[key] = row;
-                    }
-                    row.PersonIndex = idx;
-                }
+                    SetRowIndex(key, ref row, idx);
             }
         }
+
+    }
+
+    private void SetRowIndex(string key, ref ScoutRow row, int idx)
+    {
+        if (row.PersonIndex > 0 && row.PersonIndex != idx)
+        {
+            // the game recycled this table row for another player —
+            // start fresh instead of mixing two people's data
+            row = new ScoutRow();
+            _rows[key] = row;
+        }
+        row.PersonIndex = idx;
+    }
+
+    // Person-level shadow DB: rows keyed by DB person index, merged across tables.
+    private readonly Dictionary<int, ScoutRow> _persons = new();
+
+    private void MergePerson(ScoutRow row)
+    {
+        if (!_persons.TryGetValue(row.PersonIndex, out var p))
+        {
+            p = new ScoutRow { PersonIndex = row.PersonIndex };
+            _persons[row.PersonIndex] = p;
+        }
+        string n = row.AnyName;
+        if (n != null && (p.Name == null || n.Length > p.Name.Length)) p.Name = n;
+        if (row.Age > 0) p.Age = row.Age;
+        if (row.CaMax > 0) { p.CaMin = row.CaMin; p.CaMax = row.CaMax; }
+        if (row.PaMax > 0) { p.PaMin = row.PaMin; p.PaMax = row.PaMax; }
     }
 
     private static bool TryParseTagged(string v, string tag, out int n)
