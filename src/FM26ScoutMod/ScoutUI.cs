@@ -244,8 +244,15 @@ public class ScoutUI : MonoBehaviour
 
             string dtName = null;
             object dt = Call(tv, tvt, "get_DataType");
-            Type realT = dt as Type;   // v0.12 proved DataType is a real managed Type
+            Type realT = dt as Type;   // managed Type if interop mapped it directly...
             if (dt != null) dtName = realT?.Name ?? Call(dt, dt.GetType(), "get_Name") as string;
+            if (realT == null && dt != null)
+            {
+                // ...otherwise it's an Il2CppSystem.Type: resolve the managed
+                // proxy class by full name so As<RealType> gives a typed payload.
+                string fn = Call(dt, dt.GetType(), "get_FullName") as string;
+                if (fn != null) realT = ResolveProxyType(fn);
+            }
             dtName ??= "?";
 
             if (!_tvApiDumped) { _tvApiDumped = true; DumpTypedValueApi(tvt); }
@@ -347,21 +354,95 @@ public class ScoutUI : MonoBehaviour
         if (rt.IsPrimitive || rt.IsEnum || r is string)
             return Trunc(SafeToString(r));
 
+        // v0.13 lesson: As<Object> hands back a proxy typed as the interop BASE
+        // (Il2CppSystem.Object), which exposes nothing. Use interop's own
+        // GetIl2CppType + TryCast<T> to re-type it as its real class first.
+        if (rt.FullName == "Il2CppSystem.Object")
+        {
+            r = UpCast(r);
+            rt = r.GetType();
+        }
+
         // A meaningful ToString (not just a type name) wins.
         string s = SafeToString(r);
         if (!string.IsNullOrEmpty(s) && s != "Il2CppSystem.Object" && s != rt.FullName && s != rt.Name)
             return Trunc(s);
 
-        if (dtName.StartsWith("List", StringComparison.Ordinal))
+        if (rt.Name.StartsWith("List`", StringComparison.Ordinal) || dtName.StartsWith("List", StringComparison.Ordinal))
             return DescribeList(r);
 
-        return DrillPayload(r, dtName);
+        return DrillPayload(r, rt.Name);
+    }
+
+    // Re-type an interop-base proxy as its actual class, resolved by il2cpp
+    // full name against the loaded interop assemblies.
+    private object UpCast(object payload)
+    {
+        try
+        {
+            object il2t = Call(payload, payload.GetType(), "GetIl2CppType");
+            if (il2t == null) return payload;
+            string fn = Call(il2t, il2t.GetType(), "get_FullName") as string;
+            if (string.IsNullOrEmpty(fn)) return payload;
+            Type proxy = ResolveProxyType(fn);
+            if (proxy == null) return payload;
+            MethodInfo tc = null;
+            foreach (var m in payload.GetType().GetMethods())
+                if (m.Name == "TryCast" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0) { tc = m; break; }
+            if (tc == null) return payload;
+            object cast = tc.MakeGenericMethod(proxy).Invoke(payload, null);
+            return cast ?? payload;
+        }
+        catch { return payload; }
+    }
+
+    private readonly Dictionary<string, Type> _proxyTypeCache = new();
+
+    // il2cpp full name -> managed interop proxy Type. Handles List`1[[Elem,...]]
+    // and the System.* -> Il2CppSystem.* namespace mapping.
+    private Type ResolveProxyType(string fullName)
+    {
+        if (_proxyTypeCache.TryGetValue(fullName, out var cached)) return cached;
+        Type result = null;
+        int g = fullName.IndexOf("`1[[", StringComparison.Ordinal);
+        if (g >= 0)
+        {
+            string outer = fullName.Substring(0, g) + "`1";
+            int start = g + 4;
+            int comma = fullName.IndexOf(',', start);
+            Type elem = comma > start ? ResolveProxyType(fullName.Substring(start, comma - start)) : null;
+            Type outerDef = FindLoadedType(outer) ?? FindLoadedType(MapSystem(outer));
+            if (outerDef != null && elem != null)
+                try { result = outerDef.MakeGenericType(elem); } catch { }
+        }
+        else
+        {
+            result = FindLoadedType(fullName) ?? FindLoadedType(MapSystem(fullName));
+        }
+        if (result == null)
+            L($"  ??? no proxy type found for il2cpp type '{Trunc(fullName)}'");
+        _proxyTypeCache[fullName] = result;
+        return result;
+    }
+
+    private static string MapSystem(string n)
+        => n.StartsWith("System.", StringComparison.Ordinal) ? "Il2CppSystem." + n.Substring(7) : n;
+
+    private static Type FindLoadedType(string fullName)
+    {
+        foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type t = null;
+            try { t = a.GetType(fullName); } catch { }
+            if (t != null) return t;
+        }
+        return null;
     }
 
     private string DescribeList(object list)
     {
-        int count = ToInt(Call(list, list.GetType(), "get_Count"));
-        var sb = new StringBuilder("List(count=").Append(count).Append(')');
+        object cnt = Call(list, list.GetType(), "get_Count");
+        var sb = new StringBuilder("List(count=").Append(cnt == null ? "?" : cnt.ToString()).Append(')');
         int i = 0;
         foreach (object item in EnumerateIl2Cpp(list))
         {
@@ -386,16 +467,20 @@ public class ScoutUI : MonoBehaviour
             {
                 var ps = Safe(m.GetParameters);
                 string rn = TryGet(() => (object)m.ReturnType?.Name) as string;
-                if (dump)
+                // skip interop plumbing inherited from Il2CppObjectBase/Object
+                string decl = TryGet(() => (object)m.DeclaringType?.FullName) as string;
+                bool plumbing = decl == null || decl == "System.Object" || decl == "Il2CppSystem.Object"
+                    || decl.StartsWith("Il2CppInterop", StringComparison.Ordinal);
+                if (dump && !plumbing)
                 {
                     var sb = new StringBuilder();
                     for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(ps[i].ParameterType?.Name); }
                     L($"     {rn} {m.Name}{(m.IsGenericMethod ? "<T>" : "")}({sb})");
                 }
-                if (ps.Length != 0 || m.IsGenericMethod || rn == null) continue;
+                if (plumbing || ps.Length != 0 || m.IsGenericMethod || rn == null) continue;
                 bool valueish = rn == "String" || rn == "Int32" || rn == "Int64" || rn == "Single"
                     || rn == "Double" || rn == "Boolean" || rn == "UInt32" || rn == "Byte" || rn == "Int16";
-                if (valueish && m.Name != "ToString" && m.Name != "GetHashCode")
+                if (valueish && m.Name != "ToString" && m.Name != "GetHashCode" && m.Name != "get_WasCollected")
                     getters.Add(m);
             }
             _drillGetters[typeName] = getters;
