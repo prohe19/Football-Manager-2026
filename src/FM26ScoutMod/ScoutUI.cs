@@ -349,7 +349,9 @@ public class ScoutUI : MonoBehaviour
     private readonly Dictionary<string, List<MethodInfo>> _drillGetters = new();
     private int _drillDumps;
 
-    private string FormatPayload(object r, string dtName)
+    private string FormatPayload(object r, string dtName) => FormatPayload(r, dtName, 0);
+
+    private string FormatPayload(object r, string dtName, int depth)
     {
         if (r == null) return "null";
         Type rt = r.GetType();
@@ -358,22 +360,64 @@ public class ScoutUI : MonoBehaviour
 
         // v0.13 lesson: As<Object> hands back a proxy typed as the interop BASE
         // (Il2CppSystem.Object), which exposes nothing. Use interop's own
-        // GetIl2CppType + TryCast<T> to re-type it as its real class first.
+        // GetIl2CppType + TryCast<T> (pointer-rewrap fallback) to re-type it.
         if (rt.FullName == "Il2CppSystem.Object")
         {
             r = UpCast(r);
             rt = r.GetType();
         }
 
-        // A meaningful ToString (not just a type name) wins.
+        // A TypedValue nested inside a container: unwrap it the normal way.
+        if (rt.Name.Contains("TypedValue") && depth < 3)
+            return ExtractTypedValue(r);
+
+        // A meaningful ToString (not just a type name) wins — this is how
+        // DynamicNumber prints its number.
         string s = SafeToString(r);
         if (!string.IsNullOrEmpty(s) && s != "Il2CppSystem.Object" && s != rt.FullName && s != rt.Name)
             return Trunc(s);
 
-        if (rt.Name.StartsWith("List`", StringComparison.Ordinal) || dtName.StartsWith("List", StringComparison.Ordinal))
-            return DescribeList(r);
+        // Enumerable payloads (List`1, DynamicReference's key/value map, star
+        // ranges): print count + first entries.
+        if (depth < 2 && HasNoArgMethod(rt, "GetEnumerator"))
+            return DescribeEnumerable(r, depth);
 
+        if (depth >= 2) return $"<{rt.Name}>";
         return DrillPayload(r, rt.Name);
+    }
+
+    private static bool HasNoArgMethod(Type t, string name)
+    {
+        foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            if (m.Name == name && !m.IsGenericMethodDefinition && m.GetParameters().Length == 0) return true;
+        return false;
+    }
+
+    private string DescribeEnumerable(object coll, int depth)
+    {
+        Type ct = coll.GetType();
+        object cnt = Call(coll, ct, "get_Count");
+        var sb = new StringBuilder(ct.Name.StartsWith("List`", StringComparison.Ordinal) ? "List" : ct.Name)
+            .Append("(count=").Append(cnt == null ? "?" : cnt.ToString()).Append(')');
+        int i = 0;
+        foreach (object item in EnumerateIl2Cpp(coll))
+        {
+            sb.Append(i == 0 ? " [" : ", ");
+            if (item == null) sb.Append("null");
+            else
+            {
+                object k = Call(item, item.GetType(), "get_Key");
+                object v = Call(item, item.GetType(), "get_Value");
+                if (k != null || v != null)
+                    sb.Append(Trunc(SafeToString(k))).Append('=')
+                      .Append(v == null ? "null" : FormatPayload(v, "", depth + 1));
+                else
+                    sb.Append(FormatPayload(item, "", depth + 1));
+            }
+            if (++i >= 5) { sb.Append(", …"); break; }
+        }
+        if (i > 0) sb.Append(']');
+        return sb.ToString();
     }
 
     // Re-type an interop-base proxy as its actual class, resolved by il2cpp
@@ -391,9 +435,25 @@ public class ScoutUI : MonoBehaviour
             MethodInfo tc = null;
             foreach (var m in payload.GetType().GetMethods())
                 if (m.Name == "TryCast" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0) { tc = m; break; }
-            if (tc == null) return payload;
-            object cast = tc.MakeGenericMethod(proxy).Invoke(payload, null);
-            return cast ?? payload;
+            if (tc != null)
+            {
+                object cast = null;
+                try { cast = tc.MakeGenericMethod(proxy).Invoke(payload, null); } catch { }
+                if (cast != null) return cast;
+            }
+            // TryCast returns null for closed generics whose il2cpp class
+            // pointer isn't registered (List`1<...>). Every proxy class has an
+            // IntPtr ctor though — re-wrap the raw pointer directly. Safe here
+            // because the type came from the object's own GetIl2CppType.
+            if (Call(payload, payload.GetType(), "get_Pointer") is IntPtr ip && ip != IntPtr.Zero)
+            {
+                var ctor = proxy.GetConstructor(new[] { typeof(IntPtr) });
+                if (ctor != null)
+                {
+                    try { return ctor.Invoke(new object[] { ip }); } catch { }
+                }
+            }
+            return payload;
         }
         catch { return payload; }
     }
@@ -439,22 +499,6 @@ public class ScoutUI : MonoBehaviour
             if (t != null) return t;
         }
         return null;
-    }
-
-    private string DescribeList(object list)
-    {
-        object cnt = Call(list, list.GetType(), "get_Count");
-        var sb = new StringBuilder("List(count=").Append(cnt == null ? "?" : cnt.ToString()).Append(')');
-        int i = 0;
-        foreach (object item in EnumerateIl2Cpp(list))
-        {
-            if (i == 0) sb.Append(" [");
-            else sb.Append(", ");
-            sb.Append(item == null ? "null" : Trunc(SafeToString(item)));
-            if (++i >= 3) { sb.Append(", …"); break; }
-        }
-        if (i > 0) sb.Append(']');
-        return sb.ToString();
     }
 
     private string DrillPayload(object payload, string typeName)
