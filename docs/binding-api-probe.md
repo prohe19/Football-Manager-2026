@@ -378,3 +378,21 @@ The row X-ray answered everything at once:
 fallback); exclude Human-flavoured refs from identity; source priority — the
 row's own `.binding` node and `PlayerIndex` prop are authoritative and may
 correct a weak guess, same-node changes still reset the row (recycling).
+
+### v0.25 result → v0.26
+
+Identity fix confirmed working (starred rows now carry correct distinct
+indexes: 93734, 45353, 145097 — no manager hijack). But `InitialSurname`
+appeared ZERO times in the whole run: it is a **hover-tooltip node**, created
+only while the mouse is over a name cell (v0.24 had exactly two — the two rows
+the user happened to hover). Not a scalable name source.
+
+**v0.26:** the visible name column must be a plain propID-0 string cell we
+never captured. So: (1) every processed node now goes through Capture, and
+untyped `[String]` cells of a row are examined — markup carrying the profile
+tooltip ("Click to view …'s profile") yields a definitive full name; a plain
+string passing a looks-like-a-name test (space + lowercase, no digits/parens)
+is a weak fallback; (2) every string cell is remembered per row and printed in
+the starred-row diagnostics (`cells=[…]`), so the next log shows exactly what
+each column holds; (3) name strength tracked end-to-end (weak names never
+overwrite tooltip/prop names).

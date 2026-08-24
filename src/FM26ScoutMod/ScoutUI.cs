@@ -319,10 +319,11 @@ public class ScoutUI : MonoBehaviour
                     catch { }
                 }
 
-                if (interesting || _refNodes.Contains(hash))
-                    Capture(path, name, propId, val);
+                // Every processed node goes through Capture — new nodes included,
+                // so one-shot string cells (visible column texts) are seen too.
+                Capture(path, name, propId, val);
 
-                if (xbuf != null && path != null && xbuf.Count < 800)
+                if (xbuf != null && path != null && xbuf.Count < 2000)
                 {
                     string rk = RowKey(path);
                     if (rk != null)
@@ -397,7 +398,9 @@ public class ScoutUI : MonoBehaviour
                 {
                     var r = kvp.Value;
                     if (r.CaMax <= 0 && r.PaMax <= 0) continue;
-                    L($"      starred row: name={r.AnyName ?? "?"} age={r.Age} ca={r.CaMin}-{r.CaMax} pa={r.PaMin}-{r.PaMax} idx={r.PersonIndex} key={Trunc(kvp.Key)}");
+                    string cells = r.Cells == null ? "" : string.Join(" | ", System.Linq.Enumerable.Select(r.Cells, c => $"{c.Key}={c.Value}"));
+                    if (cells.Length > 160) cells = cells.Substring(0, 160);
+                    L($"      starred row: name={r.AnyName ?? "?"} age={r.Age} ca={r.CaMin}-{r.CaMax} pa={r.PaMin}-{r.PaMax} idx={r.PersonIndex} key={Trunc(kvp.Key)} cells=[{cells}]");
                     if (++dumped >= 3) break;
                 }
                 dumped = 0;
@@ -442,11 +445,27 @@ public class ScoutUI : MonoBehaviour
         public int PersonIndex = -1;
         public string IdxPath;   // node that supplied PersonIndex (recycle detection)
         public bool IdxStrong;   // index came from the row's own binding / PlayerIndex
+        public bool NameStrong;  // name came from a tooltip / a Name-family prop
+        public Dictionary<string, string> Cells;   // string cells seen (diagnostics)
 
         // Best display name we have for this record.
         public string AnyName =>
             Name ?? (SecondName == null ? null
                    : FirstName == null ? SecondName : FirstName + " " + SecondName);
+    }
+
+    private static void SetName(ScoutRow row, string name, bool strong)
+    {
+        if (name == null) return;
+        if (strong)
+        {
+            if (row.Name == null || !row.NameStrong || name.Length > row.Name.Length)
+            { row.Name = name; row.NameStrong = true; }
+        }
+        else if (row.Name == null)
+        {
+            row.Name = name;
+        }
     }
 
     private static readonly HashSet<uint> CapturedProps = new()
@@ -543,10 +562,7 @@ public class ScoutUI : MonoBehaviour
                 if (pageRow) break;
                 string tail = path.Length > key.Length ? path.Substring(key.Length) : "";
                 if (!Has(tail, "Team") && !Has(tail, "Club") && !Has(tail, "Nation") && !Has(tail, "Competition"))
-                {
-                    string n = ParseDisplayString(val);
-                    if (n != null && (row.Name == null || n.Length > row.Name.Length)) row.Name = n;
-                }
+                    SetName(row, ParseDisplayString(val), strong: true);
                 break;
             case 1718186862u:  // FirstName
                 { var f = ParseDisplayString(val); if (f != null) row.FirstName = f; }
@@ -554,14 +570,9 @@ public class ScoutUI : MonoBehaviour
             case 1936024430u:  // SecondName
                 { var s2 = ParseDisplayString(val); if (s2 != null) row.SecondName = s2; }
                 break;
-            case 1767075437u:  // InitialSurname — star tables' own name cell
-                               // ("D. Essugo"); the FULL name hides inside the
-                               // styled markup's tooltip ("Click to view
-                               // Dário Cassia Luís Essugo's profile").
-                {
-                    string nm = NameFromStyled(val);
-                    if (nm != null && (row.Name == null || nm.Length > row.Name.Length)) row.Name = nm;
-                }
+            case 1767075437u:  // InitialSurname — hover-tooltip name node
+                               // ("D. Essugo" + full name in the markup).
+                SetName(row, NameFromStyled(val), strong: true);
                 break;
             // NOTE: UniqueId (1970170212) is deliberately NOT used as the join key —
             // it may be a different numbering than PersonReference.m_index, and a
@@ -596,6 +607,29 @@ public class ScoutUI : MonoBehaviour
         {
             if (TryParseTagged(val, "DynamicNumber", out int pidx2) && pidx2 > 0)
                 SetRowIndex(key, ref row, pidx2, path, strong: true);
+        }
+        else if (!pageRow && propId == 0 && val.StartsWith("[String] ", StringComparison.Ordinal))
+        {
+            // Untyped string CELLS of a row (the visible column texts). The name
+            // column is one of these: if its markup carries the profile tooltip
+            // that's a definitive full name; otherwise a plain string that looks
+            // like a name is a weak fallback. Every cell is remembered for the
+            // per-row diagnostics so the log shows us what each column holds.
+            string full = TooltipName(val);
+            if (full != null)
+            {
+                SetName(row, full, strong: true);
+            }
+            else
+            {
+                string disp = ParseDisplayString(val);
+                if (LooksLikeName(disp)) SetName(row, disp, strong: false);
+                if (disp != null && path.Length > key.Length)
+                {
+                    row.Cells ??= new Dictionary<string, string>();
+                    if (row.Cells.Count < 6) row.Cells[path.Substring(key.Length)] = disp;
+                }
+            }
         }
     }
 
@@ -637,7 +671,18 @@ public class ScoutUI : MonoBehaviour
             _persons[row.PersonIndex] = p;
         }
         string n = row.AnyName;
-        if (n != null && (p.Name == null || n.Length > p.Name.Length)) p.Name = n;
+        if (n != null)
+        {
+            if (row.NameStrong)
+            {
+                if (p.Name == null || !p.NameStrong || n.Length > p.Name.Length)
+                { p.Name = n; p.NameStrong = true; }
+            }
+            else if (p.Name == null)
+            {
+                p.Name = n;   // weak heuristic name — better than "player #N"
+            }
+        }
         if (row.Age > 0) p.Age = row.Age;
         if (row.CaMax > 0) { p.CaMin = row.CaMin; p.CaMax = row.CaMax; }
         if (row.PaMax > 0) { p.PaMin = row.PaMin; p.PaMax = row.PaMax; }
@@ -672,46 +717,72 @@ public class ScoutUI : MonoBehaviour
         (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
         || c == '+' || c == '/' || c == '=';
 
-    // Name cells in star tables are styled "☺<base64 markup>☻D. Essugo☺" where
-    // the base64 tooltip text contains the person's FULL name:
-    // "…Click to view Dário Cassia Luís Essugo's profile". Prefer the full name,
-    // fall back to the display text.
-    private static string NameFromStyled(string val)
+    // Styled cells embed base64 tooltip markup that often contains the person's
+    // FULL name: "…Click to view Dário Cassia Luís Essugo's profile". Extracting
+    // it is definitive — only person cells carry that tooltip.
+    private static string TooltipName(string val)
     {
-        string disp = ParseDisplayString(val);
-        string full = null;
         int i = val.IndexOf("[String] ", StringComparison.Ordinal);
-        if (i >= 0)
+        if (i < 0) return null;
+        string s = val.Substring(i + 9).Trim();
+        int start = 0;
+        while (start < s.Length && (s[start] == '☺' || s[start] == '☻')) start++;
+        int end = start;
+        while (end < s.Length && IsB64(s[end])) end++;
+        if (end - start < 24 || (end - start) % 4 != 0) return null;
+        try
         {
-            string s = val.Substring(i + 9).Trim();
-            int start = 0;
-            while (start < s.Length && (s[start] == '☺' || s[start] == '☻')) start++;
-            int end = start;
-            while (end < s.Length && IsB64(s[end])) end++;
-            if (end - start >= 24 && (end - start) % 4 == 0)
+            string text = System.Text.Encoding.UTF8.GetString(
+                Convert.FromBase64String(s.Substring(start, end - start)));
+            int c = text.IndexOf("Click to view ", StringComparison.Ordinal);
+            if (c >= 0)
             {
-                try
-                {
-                    string text = System.Text.Encoding.UTF8.GetString(
-                        Convert.FromBase64String(s.Substring(start, end - start)));
-                    int c = text.IndexOf("Click to view ", StringComparison.Ordinal);
-                    if (c >= 0)
-                    {
-                        c += 14;
-                        int d = text.IndexOf("'s profile", c, StringComparison.Ordinal);
-                        if (d > c && d - c < 60) full = text.Substring(c, d - c);
-                    }
-                }
-                catch { }
-                if (disp == null && end < s.Length)
-                {
-                    // no ☻ marker — take whatever trails the markup blob
-                    string t = s.Substring(end).Trim('☺', '☻', ' ');
-                    if (t.Length > 0 && t.Length < 60) disp = t;
-                }
+                c += 14;
+                int d = text.IndexOf("'s profile", c, StringComparison.Ordinal);
+                if (d > c && d - c < 60) return text.Substring(c, d - c);
             }
         }
-        return full ?? disp;
+        catch { }
+        return null;
+    }
+
+    // Name cell markup + display fallback ("D. Essugo").
+    private static string NameFromStyled(string val)
+    {
+        string full = TooltipName(val);
+        if (full != null) return full;
+        string disp = ParseDisplayString(val);
+        if (disp != null) return disp;
+        // no ☻ marker — take whatever trails the base64 blob
+        int i = val.IndexOf("[String] ", StringComparison.Ordinal);
+        if (i < 0) return null;
+        string s = val.Substring(i + 9).Trim();
+        int start = 0;
+        while (start < s.Length && (s[start] == '☺' || s[start] == '☻')) start++;
+        int end = start;
+        while (end < s.Length && IsB64(s[end])) end++;
+        if (end - start >= 24 && end < s.Length)
+        {
+            string t = s.Substring(end).Trim('☺', '☻', ' ');
+            if (t.Length > 0 && t.Length < 60) return t;
+        }
+        return null;
+    }
+
+    // Plain-string cell heuristic: could this be a person's name? Rejects
+    // position codes ("ST (C)", "DM"), numbers, percentages; requires a space
+    // and at least one lowercase letter ("D. Essugo", "Wesley Fofana").
+    private static bool LooksLikeName(string s)
+    {
+        if (s == null || s.Length < 4 || s.Length > 40) return false;
+        if (s.IndexOf(' ') < 0) return false;
+        bool lower = false;
+        foreach (char c in s)
+        {
+            if (char.IsDigit(c) || c == '(' || c == ')' || c == '%' || c == ':' || c == '€' || c == '£' || c == '$') return false;
+            if (char.IsLower(c)) lower = true;
+        }
+        return lower;
     }
 
     // The game styles strings as "☺<markup>☻Display Text☺" — pull the display text.
