@@ -257,7 +257,17 @@ public class ScoutUI : MonoBehaviour
 
             if (!_tvApiDumped) { _tvApiDumped = true; DumpTypedValueApi(tvt); }
 
-            // Reuse an accessor that already worked for this data type.
+            // v0.14 lesson: As<T> with an il2cpp STRUCT type (GameDate, DateTime,
+            // Color32…) asks for a generic instantiation that was never compiled
+            // into the game -> instant native crash, uncatchable. So generic
+            // As<T> is now used ONLY for known-safe primitives; everything else
+            // goes through the non-generic `Object Get()` + TryCast (constraint-
+            // checked, cannot crash) with AsString() as the fallback.
+
+            if (_tvUseGet.Contains(dtName))
+                return $"[{dtName}] {ViaGet(tv, tvt, dtName)}";
+
+            // Reuse a primitive accessor that already worked for this data type.
             if (_tvWinners.TryGetValue(dtName, out var winner))
             {
                 if (winner == null) return $"[{dtName}] <?>";
@@ -265,12 +275,10 @@ public class ScoutUI : MonoBehaviour
                 return $"[{dtName}] {(rr == null ? "<read-failed>" : FormatPayload(rr, dtName))}";
             }
 
-            // Try generic getters bound to the REAL payload type first (so the
-            // proxy comes back correctly typed and we can drill into it), then
-            // the primitive fallbacks.
+            // Primitive payloads: bind As<T> to the matching CLR primitive.
             if (_tvGenericGetters != null)
             {
-                foreach (Type clr in CandidateTypes(realT, dtName))
+                foreach (Type clr in CandidateClrTypes(dtName))
                 {
                     foreach (var g in _tvGenericGetters)
                     {
@@ -287,33 +295,27 @@ public class ScoutUI : MonoBehaviour
                 }
             }
 
-            // Fall back to static conversion operators.
-            if (_tvConversions != null)
-            {
-                foreach (var c in _tvConversions)
-                {
-                    object r;
-                    try { r = c.Invoke(null, new[] { tv }); } catch { continue; }
-                    if (r == null) continue;
-                    _tvWinners[dtName] = c;
-                    L($"  >>> extractor found: {dtName} -> static {c.Name}");
-                    return $"[{dtName}] {FormatPayload(r, dtName)}";
-                }
-            }
-
-            _tvWinners[dtName] = null;   // don't rediscover-fail on every node
-            return $"[{dtName}] <?>";
+            // Everything else: the crash-proof route.
+            _tvUseGet.Add(dtName);
+            return $"[{dtName}] {ViaGet(tv, tvt, dtName)}";
         }
         catch (Exception e) { return "<err:" + e.Message + ">"; }
     }
 
-    private static IEnumerable<Type> CandidateTypes(Type realT, string dtName)
+    private readonly HashSet<string> _tvUseGet = new();
+
+    // Crash-proof payload read: non-generic `Object Get()`, re-typed via
+    // TryCast where possible, with `AsString()` as the universal fallback.
+    private string ViaGet(object tv, Type tvt, string dtName)
     {
-        if (realT != null && realT != typeof(void))
-            yield return realT;
-        foreach (var t in CandidateClrTypes(dtName))
-            if (t != realT)
-                yield return t;
+        object payload = Call(tv, tvt, "Get");
+        string formatted = payload == null ? null : FormatPayload(payload, dtName);
+        if (formatted != null && !formatted.StartsWith("<opaque", StringComparison.Ordinal))
+            return formatted;
+        string s = TryGet(() => Call(tv, tvt, "AsString")) as string;
+        if (!string.IsNullOrEmpty(s))
+            return Trunc(s);
+        return formatted ?? "<no-payload>";
     }
 
     private static object InvokeGetterRaw(MethodInfo m, object tv)
@@ -483,6 +485,9 @@ public class ScoutUI : MonoBehaviour
                 if (valueish && m.Name != "ToString" && m.Name != "GetHashCode" && m.Name != "get_WasCollected")
                     getters.Add(m);
             }
+            // public getters before internal m_ backing fields
+            getters.Sort((a, x) => a.Name.StartsWith("get_m_", StringComparison.Ordinal)
+                .CompareTo(x.Name.StartsWith("get_m_", StringComparison.Ordinal)));
             _drillGetters[typeName] = getters;
         }
 
@@ -521,11 +526,9 @@ public class ScoutUI : MonoBehaviour
                 yield return typeof(Il2CppSystem.Object);
                 break;
             default:
-                // Game types (references, lists, enums): try the universal object
-                // route first, then int (enums are int-backed).
-                yield return typeof(Il2CppSystem.Object);
-                yield return typeof(int);
-                break;
+                // Game types go through the non-generic Get() route instead —
+                // binding As<T> to arbitrary (struct) types crashes the game.
+                yield break;
         }
     }
 
@@ -588,7 +591,7 @@ public class ScoutUI : MonoBehaviour
         {
             MethodInfo m = null;
             foreach (var x in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                if (x.Name == method && x.GetParameters().Length == 0) { m = x; break; }
+                if (x.Name == method && !x.IsGenericMethodDefinition && x.GetParameters().Length == 0) { m = x; break; }
             return m?.Invoke(inst, null);
         }
         catch { return null; }
