@@ -385,8 +385,60 @@ public class ScoutUI : MonoBehaviour
         if (depth < 2 && HasNoArgMethod(rt, "GetEnumerator"))
             return DescribeEnumerable(r, depth);
 
+        // Still stuck as the untyped interop base (closed-generic List proxies
+        // can't be instantiated): enumerate through il2cpp's own reflection,
+        // which needs no proxy typing at all.
+        if (depth < 2 && rt.FullName == "Il2CppSystem.Object")
+        {
+            string d = DescribeUntypedCollection(r, depth);
+            if (d != null) return d;
+        }
+
         if (depth >= 2) return $"<{rt.Name}>";
         return DrillPayload(r, rt.Name);
+    }
+
+    // Invoke a no-arg il2cpp method by name on an UNTYPED proxy, going through
+    // il2cpp reflection: obj.GetIl2CppType().GetMethod(name).Invoke(obj, null).
+    private object Il2Invoke(object obj, string method)
+    {
+        try
+        {
+            object il2t = Call(obj, obj.GetType(), "GetIl2CppType");
+            if (il2t == null) return null;
+            MethodInfo getMethod = null;
+            foreach (var m in il2t.GetType().GetMethods())
+                if (m.Name == "GetMethod" && m.GetParameters().Length == 1
+                    && m.GetParameters()[0].ParameterType == typeof(string)) { getMethod = m; break; }
+            object mi = getMethod?.Invoke(il2t, new object[] { method });
+            if (mi == null) return null;
+            foreach (var im in mi.GetType().GetMethods())
+                if (im.Name == "Invoke" && im.GetParameters().Length == 2)
+                    return TryGet(() => im.Invoke(mi, new object[] { obj, null }));
+        }
+        catch { }
+        return null;
+    }
+
+    // Count + first entries of an il2cpp collection we could not re-type.
+    // Returns null when the object has no Count (i.e. not a collection).
+    private string DescribeUntypedCollection(object coll, int depth)
+    {
+        object cnt = Il2Invoke(coll, "get_Count");
+        if (cnt == null) return null;
+        var sb = new StringBuilder("List(count=").Append(Trunc(SafeToString(cnt))).Append(')');
+        object en = Il2Invoke(coll, "GetEnumerator");
+        int i = 0;
+        while (en != null && i < 5)
+        {
+            if (SafeToString(Il2Invoke(en, "MoveNext")) != "True") break;
+            object cur = Il2Invoke(en, "get_Current");
+            sb.Append(i == 0 ? " [" : ", ").Append(cur == null ? "null" : FormatPayload(cur, "", depth + 1));
+            i++;
+        }
+        if (i >= 5) sb.Append(", …");
+        if (i > 0) sb.Append(']');
+        return sb.ToString();
     }
 
     private static bool HasNoArgMethod(Type t, string name)
