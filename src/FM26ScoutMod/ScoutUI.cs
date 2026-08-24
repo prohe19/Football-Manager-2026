@@ -288,17 +288,28 @@ public class ScoutUI : MonoBehaviour
                 else if (printed < MaxColdLinesPerPass) { printed++; L(line); }
             }
 
-            if (verbose)
+            int named = 0, withCa = 0, withPa = 0;
+            foreach (var r in _rows.Values)
             {
-                L($"----- pass {_snapshots}: new={added}, printed={printed}, HOT={hot}, scoutRows={_rows.Count} -----");
-                if (_snapshots == MaxSnapshots)
+                if (r.Name != null) named++;
+                if (r.CaMax > 0) withCa++;
+                if (r.PaMax > 0) withPa++;
+            }
+            if (verbose || _snapshots % 6 == 0)
+            {
+                L($"----- pass {_snapshots}: new={added}, printed={printed}, HOT={hot}, scoutRows={_rows.Count} (named={named} ca={withCa} pa={withPa}) -----");
+                int dumped = 0;
+                foreach (var kvp in _rows)
+                {
+                    var r = kvp.Value;
+                    if (r.Name == null && r.CaMax <= 0) continue;
+                    L($"      sample row: name={r.Name ?? "?"} age={r.Age} ca={r.CaMin}-{r.CaMax} pa={r.PaMin}-{r.PaMax} idx={r.PersonIndex} key={Trunc(kvp.Key)}");
+                    if (++dumped >= 3) break;
+                }
+                if (verbose && _snapshots == MaxSnapshots)
                     LogWinnerSummary();
             }
-            else if (_snapshots % 6 == 0)
-            {
-                L($"----- scout pass {_snapshots}: rows={_rows.Count} -----");
-            }
-            _status = $"pass {_snapshots} done ({added} new). Scouted rows: {_rows.Count}";
+            _status = $"pass {_snapshots}: rows={_rows.Count}, named={named}, CA={withCa}, PA={withPa}";
         }
         catch (Exception ex)
         {
@@ -332,13 +343,29 @@ public class ScoutUI : MonoBehaviour
 
     private readonly Dictionary<string, ScoutRow> _rows = new();
 
+    // A table row lives under ".Items.<row>." (squad tables) or
+    // ".items<n>.<row>." (streamed lists, search results) — group by the path
+    // up to and including the row token.
     private static string RowKey(string path)
     {
-        int i = path.IndexOf(".Items.", StringComparison.Ordinal);
-        if (i < 0) return null;
-        int start = i + 7;
-        int end = path.IndexOf('.', start);
-        return end < 0 ? path : path.Substring(0, end);
+        int i = path.IndexOf("tems", StringComparison.Ordinal);
+        while (i > 0)
+        {
+            char c0 = path[i - 1];
+            if ((c0 == 'I' || c0 == 'i') && (i == 1 || path[i - 2] == '.'))
+            {
+                int j = i + 4;                                        // after "tems"
+                while (j < path.Length && char.IsDigit(path[j])) j++; // "items0"
+                if (j < path.Length && path[j] == '.')
+                {
+                    int k = j + 1;
+                    while (k < path.Length && path[k] != '.') k++;    // row token
+                    if (k > j + 1) return path.Substring(0, k);
+                }
+            }
+            i = path.IndexOf("tems", i + 1, StringComparison.Ordinal);
+        }
+        return null;
     }
 
     private void Capture(string path, string nodeName, uint propId, string val)
@@ -364,10 +391,12 @@ public class ScoutUI : MonoBehaviour
             case 1480150644u: case 1349468514u: case 1129333074u:  // PA
                 if (TryParseRange(val, out int pmin, out int pmax)) { row.PaMin = pmin; row.PaMax = pmax; }
                 break;
-            case 1851878757u:  // Name — rows also carry club/nation names; keep
-                               // the longest person-looking one not from a
-                               // Team/Club/Nation sub-path.
-                if (!Has(path, "Team") && !Has(path, "Club") && !Has(path, "Nation"))
+            case 1851878757u:  // Name — rows also carry club/nation names.
+                               // Judge only the path AFTER the row key ("Team"
+                               // in "FirstTeamC" earlier in the path must not
+                               // disqualify the player's own name).
+                string tail = path.Length > key.Length ? path.Substring(key.Length) : "";
+                if (!Has(tail, "Team") && !Has(tail, "Club") && !Has(tail, "Nation") && !Has(tail, "Competition"))
                 {
                     string n = ParseDisplayString(val);
                     if (n != null && (row.Name == null || n.Length > row.Name.Length)) row.Name = n;
