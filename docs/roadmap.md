@@ -76,7 +76,7 @@ Either way the UI is the same: one in-game button/hotkey → a large overlay
 - [x] Find the **Current Ability (CA)** field on a player — **star ranges captured live from squad/search tables (v0.21)**
 - [x] Join names ↔ ratings — **✅ WORKING in-game (v0.27 screenshot): Top CA lists full names + age + CA + PA (Palmer, Caicedo, Estêvão…). Rows carry name + stars + person index together; the name-cell markup markers turned out to be 0x01/0x02 control chars, and the tooltip markup yields FULL names**
 - [ ] Rank all players by CA (via `game.Search` / Option A) — *paging through in-game Player Search already feeds every result row into the DB (confirmed same row shape); driving the search programmatically is the remaining step*
-- [ ] Show **Top 10** in the panel, with a **position filter** — *position strings ("ST (C)") already visible in row cells; capture + filter buttons next*
+- [x] Show **Top 10+** in the panel, with a **position filter** — **v0.28: All/GK/DEF/MID/ATT filter buttons + U21 toggle on the wonderkids view; positions captured from row cells ("ST (C)", "D/WB (R)")**
 
 ✅ **Done when:** the panel shows a correct Top-10-by-CA list.
 

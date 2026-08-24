@@ -168,8 +168,41 @@ public class ScoutUI : MonoBehaviour
             e.Use();
     }
 
+    // Position-filter groups: 0=All 1=GK 2=DEF 3=MID 4=ATT, plus U21 toggle
+    // for the wonderkids view.
+    private static readonly string[] PosFilters = { "All", "GK", "DEF", "MID", "ATT" };
+    private int _posFilter;
+    private bool _u21Only = true;
+
+    private static bool MatchesPosFilter(string pos, int filter)
+    {
+        if (filter == 0) return true;
+        if (pos == null) return false;
+        int p = pos.IndexOf(" (", StringComparison.Ordinal);
+        string head = p >= 0 ? pos.Substring(0, p) : pos;
+        foreach (string tok in head.Split('/'))
+        {
+            switch (filter)
+            {
+                case 1: if (tok == "GK") return true; break;
+                case 2: if (tok == "D" || tok == "WB") return true; break;
+                case 3: if (tok == "DM" || tok == "M") return true; break;
+                case 4: if (tok == "AM" || tok == "ST") return true; break;
+            }
+        }
+        return false;
+    }
+
     private float DrawTopList(bool byPa, float x, float y, float panelTop)
     {
+        // Filter buttons: positions (+ U21 toggle on the wonderkids view).
+        for (int f = 0; f < PosFilters.Length; f++)
+            if (GUI.Button(new Rect(x + f * 62, y, 58, 26), _posFilter == f ? $"[{PosFilters[f]}]" : PosFilters[f]))
+                _posFilter = f;
+        if (byPa && GUI.Button(new Rect(x + PosFilters.Length * 62 + 8, y, 76, 26), _u21Only ? "[U21]" : "U21 off"))
+            _u21Only = !_u21Only;
+        y += 32;
+
         // Merged per-person records first; raw rows only when they never learned
         // their person index (so we don't show the same player twice). A missing
         // name no longer hides a scouted player — we show a placeholder instead.
@@ -180,6 +213,10 @@ public class ScoutUI : MonoBehaviour
         foreach (var r in _rows.Values)
             if (r.PersonIndex <= 0 && (byPa ? r.PaMax > 0 : r.CaMax > 0))
                 list.Add(r);
+
+        list.RemoveAll(r => !MatchesPosFilter(r.Position, _posFilter)
+                         || (byPa && _u21Only && (r.Age <= 0 || r.Age > 21)));
+
         list.Sort((a, b) =>
         {
             int c = byPa ? b.PaMax.CompareTo(a.PaMax) : b.CaMax.CompareTo(a.CaMax);
@@ -188,24 +225,26 @@ public class ScoutUI : MonoBehaviour
         });
 
         GUI.Label(new Rect(x, y, PanelW - 20, 20),
-            (byPa ? "TOP POTENTIAL (wonderkids)" : "TOP CURRENT ABILITY") + $"  -  {list.Count} scouted");
+            (byPa ? "TOP POTENTIAL (wonderkids)" : "TOP CURRENT ABILITY") + $"  -  {list.Count} match");
         y += 22;
-        GUI.Label(new Rect(x, y, PanelW - 20, 20), "name                              age    CA       PA");
+        GUI.Label(new Rect(x, y, PanelW - 20, 20), "name                          pos      age    CA      PA");
         y += 20;
 
-        int shown = Math.Min(12, list.Count);
+        int shown = Math.Min(15, list.Count);
         for (int i = 0; i < shown; i++)
         {
             var r = list[i];
             string nm = r.AnyName ?? (r.PersonIndex > 0 ? $"player #{r.PersonIndex}" : "(name not seen yet)");
-            if (nm.Length > 28) nm = nm.Substring(0, 28);
+            if (nm.Length > 26) nm = nm.Substring(0, 26);
+            string pos = r.Position ?? "?";
+            if (pos.Length > 8) pos = pos.Substring(0, 8);
             GUI.Label(new Rect(x, y + i * 20, PanelW - 20, 20),
-                $"{i + 1,2}. {nm,-28} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-8} {Stars(r.PaMin, r.PaMax)}");
+                $"{i + 1,2}. {nm,-26} {pos,-8} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-7} {Stars(r.PaMin, r.PaMax)}");
         }
         if (shown == 0)
         {
-            GUI.Label(new Rect(x, y, PanelW - 20, 40), "Nothing scouted yet - browse squads / search results\nwith star-rating columns visible, then come back.");
-            return y + 56 - panelTop;
+            GUI.Label(new Rect(x, y, PanelW - 20, 56), "Nothing matches - browse squads / search results with\nstar columns visible, or relax the filters above.\n(U21 needs a known age - browse tables with an Age column.)");
+            return y + 72 - panelTop;
         }
         return y + shown * 20 + 12 - panelTop;
     }
@@ -446,6 +485,7 @@ public class ScoutUI : MonoBehaviour
         public string IdxPath;   // node that supplied PersonIndex (recycle detection)
         public bool IdxStrong;   // index came from the row's own binding / PlayerIndex
         public bool NameStrong;  // name came from a tooltip / a Name-family prop
+        public string Position;  // position string cell, e.g. "ST (C)", "D/WB (R)"
         public Dictionary<string, string> Cells;   // string cells seen (diagnostics)
 
         // Best display name we have for this record.
@@ -476,6 +516,7 @@ public class ScoutUI : MonoBehaviour
         1936024430u,  // SecondName
         1230661448u,  // PlayerIndex (table row → DB person index)
         1767075437u,  // InitialSurname (star tables' name cell)
+        1349481321u,  // Position
         844321568u, 1131757922u, 1128481106u,  // CA stars / ranges (+coach)
         1480150644u, 1349468514u, 1129333074u, // PA stars / ranges (+coach)
     };
@@ -574,6 +615,9 @@ public class ScoutUI : MonoBehaviour
                                // ("D. Essugo" + full name in the markup).
                 SetName(row, NameFromStyled(val), strong: true);
                 break;
+            case 1349481321u:  // Position
+                { var ps2 = ParseDisplayString(val); if (LooksLikePosition(ps2)) row.Position = ps2; }
+                break;
             // NOTE: UniqueId (1970170212) is deliberately NOT used as the join key —
             // it may be a different numbering than PersonReference.m_index, and a
             // mixed-scheme join would merge two different people.
@@ -623,7 +667,8 @@ public class ScoutUI : MonoBehaviour
             else
             {
                 string disp = ParseDisplayString(val);
-                if (LooksLikeName(disp)) SetName(row, disp, strong: false);
+                if (LooksLikePosition(disp)) row.Position = disp;
+                else if (LooksLikeName(disp)) SetName(row, disp, strong: false);
                 if (disp != null && path.Length > key.Length)
                 {
                     row.Cells ??= new Dictionary<string, string>();
@@ -684,6 +729,7 @@ public class ScoutUI : MonoBehaviour
             }
         }
         if (row.Age > 0) p.Age = row.Age;
+        if (row.Position != null) p.Position = row.Position;
         if (row.CaMax > 0) { p.CaMin = row.CaMin; p.CaMax = row.CaMax; }
         if (row.PaMax > 0) { p.PaMin = row.PaMin; p.PaMax = row.PaMax; }
     }
@@ -782,6 +828,25 @@ public class ScoutUI : MonoBehaviour
     private static string NameFromStyled(string val)
     {
         return TooltipName(val) ?? ParseDisplayString(val);
+    }
+
+    // Position cells: "GK", "DM", "ST (C)", "AM (RLC)", "D/WB (R)", "M/AM (C)".
+    private static readonly HashSet<string> PosTokens = new() { "GK", "D", "WB", "DM", "M", "AM", "ST" };
+
+    private static bool LooksLikePosition(string s)
+    {
+        if (string.IsNullOrEmpty(s) || s.Length > 20) return false;
+        string head = s;
+        int p = s.IndexOf(" (", StringComparison.Ordinal);
+        if (p >= 0)
+        {
+            if (!s.EndsWith(")", StringComparison.Ordinal)) return false;
+            head = s.Substring(0, p);
+        }
+        if (head.Length == 0) return false;
+        foreach (string tok in head.Split('/'))
+            if (!PosTokens.Contains(tok)) return false;
+        return true;
     }
 
     // Plain-string cell heuristic: could this be a person's name? Rejects
