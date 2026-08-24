@@ -31,7 +31,7 @@ Each stage is a commit (or set of commits) in this repo.
 
 ---
 
-## Stage 2 — Touch real game data (the risky one) ⬅️ **we are here**
+## Stage 2 — Touch real game data (the risky one) ✅ **COMPLETE (v0.19)**
 
 **Goal:** Read actual data out of the game's own objects.
 
@@ -39,10 +39,10 @@ Each stage is a commit (or set of commits) in this repo.
 - [x] **Understand how data is stored** — property-binding system, see [findings-data-model.md](findings-data-model.md)
 - [x] Runtime-dump the person **property schema** (find the CA/PA property IDs by name) — **✅ all 8,233 properties extracted; CA/PA IDs found, see [property-ids.md](property-ids.md)**
 - [x] Reach the live data store — **✅ `EmbeddedDataHandler.s_bindingSubsystem` → the binding tree, decoded to readable paths via `GetPathDebug` (v0.10–0.11); player Age/star-range/attribute nodes and the game's own `game.Search` engine located, see [binding-api-probe.md](binding-api-probe.md)**
-- [ ] Read one person's value for a property — **v0.12 in test: extract the payload out of `SI.Core.TypedValue` via its generic getter**
-- [ ] Locate the "all persons" query and print **one real player's name** — **candidate found: `game.Search` (Results / PersonList / SearchIsFinished)**
+- [x] Read one person's value for a property — **✅ v0.15–0.19: `TypedValue` payloads fully decoded (Age=27, footedness=20, star ranges [Max=20,Min=18], names, dates); the As<T>-for-structs native crash diagnosed and routed around via non-generic `Get()` + `TryCast`/pointer-rewrap/`Unbox<T>`, with il2cpp reflection for un-typeable generic lists**
+- [x] Locate the "all persons" query and print **one real player's name** — **✅ v0.19: `MainTeam.Players` = 36 `PersonReference`s with DB indexes; `FilteredPlayers`/`PersonList` enumerate; last-match XI printed real names (Mile Svilar, Wesley Fofana, …)**
 
-✅ **Done when:** our mod prints a real player's name (and ideally their CA) from your save.
+✅ **DONE** — bulk enumeration + identity + value reads all proven from a live save.
 
 ### Agreed data strategy (2026-08-24)
 
@@ -69,7 +69,7 @@ Either way the UI is the same: one in-game button/hotkey → a large overlay
 
 ---
 
-## Stage 3 — First real feature: Top Players by CA
+## Stage 3 — First real feature: Top Players by CA ⬅️ **we are here (v0.20)**
 
 **Goal:** The headline feature.
 
