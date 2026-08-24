@@ -18,14 +18,13 @@ namespace FM26ScoutMod;
 /// the flags, and the real payload accessor — which must be a GENERIC method
 /// like Get&lt;T&gt;() — was explicitly excluded by the IsGenericMethod filter.
 ///
-/// v0.12 extraction strategy (per node, cached per DataType once one works):
-///   1. read DataType (e.g. Int32/String/Boolean) from the TypedValue,
-///   2. bind each 1-type-arg generic method (0 params, or TryGet-style out
-///      param) to the matching CLR type and invoke it,
-///   3. fall back to static conversion operators (op_Implicit/op_Explicit),
-///   4. unknown/game types: try Il2CppSystem.Object then int (enums).
-/// The first accessor that returns a value is logged ("extractor found:") and
-/// reused. The full TypedValue method list is also dumped once for the record.
+/// v0.12 proved As&lt;T&gt; is the payload accessor: strings/bools printed real
+/// values. v0.13 finishes the job: DataType is a real managed Type, so we bind
+/// As&lt;RealType&gt; to get a correctly-typed payload, then DRILL into wrapper
+/// objects (DynamicNumber/DynamicReference hold the actual numbers — Age,
+/// attribute 1-20 values, star ranges) by dumping their API once and invoking
+/// their no-arg primitive getters. Lists (game.Search PersonList/Results,
+/// Team.FilteredPlayers) print their count + first items.
 /// </summary>
 public class ScoutUI : MonoBehaviour
 {
@@ -245,7 +244,8 @@ public class ScoutUI : MonoBehaviour
 
             string dtName = null;
             object dt = Call(tv, tvt, "get_DataType");
-            if (dt != null) dtName = (dt as Type)?.Name ?? Call(dt, dt.GetType(), "get_Name") as string;
+            Type realT = dt as Type;   // v0.12 proved DataType is a real managed Type
+            if (dt != null) dtName = realT?.Name ?? Call(dt, dt.GetType(), "get_Name") as string;
             dtName ??= "?";
 
             if (!_tvApiDumped) { _tvApiDumped = true; DumpTypedValueApi(tvt); }
@@ -254,24 +254,27 @@ public class ScoutUI : MonoBehaviour
             if (_tvWinners.TryGetValue(dtName, out var winner))
             {
                 if (winner == null) return $"[{dtName}] <?>";
-                return $"[{dtName}] {InvokeGetter(winner, tv) ?? "<read-failed>"}";
+                object rr = InvokeGetterRaw(winner, tv);
+                return $"[{dtName}] {(rr == null ? "<read-failed>" : FormatPayload(rr, dtName))}";
             }
 
-            // Try generic getters bound to the CLR type(s) matching DataType.
+            // Try generic getters bound to the REAL payload type first (so the
+            // proxy comes back correctly typed and we can drill into it), then
+            // the primitive fallbacks.
             if (_tvGenericGetters != null)
             {
-                foreach (Type clr in CandidateClrTypes(dtName))
+                foreach (Type clr in CandidateTypes(realT, dtName))
                 {
                     foreach (var g in _tvGenericGetters)
                     {
                         MethodInfo bound;
                         try { bound = g.MakeGenericMethod(clr); } catch { continue; }
-                        string r = InvokeGetter(bound, tv);
+                        object r = InvokeGetterRaw(bound, tv);
                         if (r != null)
                         {
                             _tvWinners[dtName] = bound;
                             L($"  >>> extractor found: {dtName} -> {g.Name}<{clr.Name}>");
-                            return $"[{dtName}] {r}";
+                            return $"[{dtName}] {FormatPayload(r, dtName)}";
                         }
                     }
                 }
@@ -287,7 +290,7 @@ public class ScoutUI : MonoBehaviour
                     if (r == null) continue;
                     _tvWinners[dtName] = c;
                     L($"  >>> extractor found: {dtName} -> static {c.Name}");
-                    return $"[{dtName}] {Trunc(SafeToString(r))}";
+                    return $"[{dtName}] {FormatPayload(r, dtName)}";
                 }
             }
 
@@ -297,31 +300,119 @@ public class ScoutUI : MonoBehaviour
         catch (Exception e) { return "<err:" + e.Message + ">"; }
     }
 
-    private static string InvokeGetter(MethodInfo m, object tv)
+    private static IEnumerable<Type> CandidateTypes(Type realT, string dtName)
+    {
+        if (realT != null && realT != typeof(void))
+            yield return realT;
+        foreach (var t in CandidateClrTypes(dtName))
+            if (t != realT)
+                yield return t;
+    }
+
+    private static object InvokeGetterRaw(MethodInfo m, object tv)
     {
         try
         {
             var ps = m.GetParameters();
             if (m.IsStatic && ps.Length == 1)
-            {
-                object r = m.Invoke(null, new[] { tv });
-                return r == null ? null : Trunc(SafeToString(r));
-            }
+                return m.Invoke(null, new[] { tv });
             if (ps.Length == 0)
-            {
-                object r = m.Invoke(tv, null);
-                return r == null ? null : Trunc(SafeToString(r));
-            }
+                return m.Invoke(tv, null);
             if (ps.Length == 1 && ps[0].ParameterType.IsByRef)
             {
                 var args = new object[1];
                 object ok = m.Invoke(tv, args);
                 if ((ok is bool okb && okb || ok == null) && args[0] != null)
-                    return Trunc(SafeToString(args[0]));
+                    return args[0];
             }
         }
         catch { }
         return null;
+    }
+
+    // ---------- payload drilling (v0.13) ----------
+    // v0.12 showed As<T> unwraps TypedValue, but numbers/lists come back as
+    // wrapper objects (DynamicNumber, DynamicReference, List`1) whose ToString
+    // is useless. Here we go one level deeper: dump each wrapper type's API
+    // once, then invoke its no-arg primitive/string getters to print the
+    // actual number/text inside.
+
+    private readonly Dictionary<string, List<MethodInfo>> _drillGetters = new();
+    private int _drillDumps;
+
+    private string FormatPayload(object r, string dtName)
+    {
+        if (r == null) return "null";
+        Type rt = r.GetType();
+        if (rt.IsPrimitive || rt.IsEnum || r is string)
+            return Trunc(SafeToString(r));
+
+        // A meaningful ToString (not just a type name) wins.
+        string s = SafeToString(r);
+        if (!string.IsNullOrEmpty(s) && s != "Il2CppSystem.Object" && s != rt.FullName && s != rt.Name)
+            return Trunc(s);
+
+        if (dtName.StartsWith("List", StringComparison.Ordinal))
+            return DescribeList(r);
+
+        return DrillPayload(r, dtName);
+    }
+
+    private string DescribeList(object list)
+    {
+        int count = ToInt(Call(list, list.GetType(), "get_Count"));
+        var sb = new StringBuilder("List(count=").Append(count).Append(')');
+        int i = 0;
+        foreach (object item in EnumerateIl2Cpp(list))
+        {
+            if (i == 0) sb.Append(" [");
+            else sb.Append(", ");
+            sb.Append(item == null ? "null" : Trunc(SafeToString(item)));
+            if (++i >= 3) { sb.Append(", …"); break; }
+        }
+        if (i > 0) sb.Append(']');
+        return sb.ToString();
+    }
+
+    private string DrillPayload(object payload, string typeName)
+    {
+        Type pt = payload.GetType();
+        if (!_drillGetters.TryGetValue(typeName, out var getters))
+        {
+            getters = new List<MethodInfo>();
+            bool dump = _drillDumps < 10;
+            if (dump) { _drillDumps++; L($"----- payload API ({pt.FullName}) -----"); }
+            foreach (var m in Safe(() => pt.GetMethods(BindingFlags.Public | BindingFlags.Instance)))
+            {
+                var ps = Safe(m.GetParameters);
+                string rn = TryGet(() => (object)m.ReturnType?.Name) as string;
+                if (dump)
+                {
+                    var sb = new StringBuilder();
+                    for (int i = 0; i < ps.Length; i++) { if (i > 0) sb.Append(", "); sb.Append(ps[i].ParameterType?.Name); }
+                    L($"     {rn} {m.Name}{(m.IsGenericMethod ? "<T>" : "")}({sb})");
+                }
+                if (ps.Length != 0 || m.IsGenericMethod || rn == null) continue;
+                bool valueish = rn == "String" || rn == "Int32" || rn == "Int64" || rn == "Single"
+                    || rn == "Double" || rn == "Boolean" || rn == "UInt32" || rn == "Byte" || rn == "Int16";
+                if (valueish && m.Name != "ToString" && m.Name != "GetHashCode")
+                    getters.Add(m);
+            }
+            _drillGetters[typeName] = getters;
+        }
+
+        var outp = new StringBuilder();
+        int ok = 0;
+        foreach (var g in getters)
+        {
+            object r;
+            try { r = g.Invoke(payload, null); } catch { continue; }
+            if (r == null) continue;
+            if (ok > 0) outp.Append(' ');
+            outp.Append(g.Name).Append('=').Append(Trunc(SafeToString(r)));
+            if (++ok >= 4) break;
+        }
+        return ok > 0 ? outp.ToString() : $"<opaque {pt.Name}>";
     }
 
     private static IEnumerable<Type> CandidateClrTypes(string dtName)

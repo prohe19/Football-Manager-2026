@@ -282,3 +282,20 @@ method**, which v0.11's heuristic explicitly skipped (`IsGenericMethod` filter).
 to the CLR type matching `DataType` and invokes it (fallbacks: TryGet-style out
 params, static conversion operators, `Il2CppSystem.Object`). The first accessor
 that works per data type is cached and logged as `>>> extractor found:`.
+
+### ✅ v0.12 result — `As<T>` is the payload accessor; one layer left
+
+The v0.12 run confirmed **`TypedValue.As<T>()` unwraps every payload** (the
+extractor summary listed ~75 data types, all via `As`). Strings and booleans
+now print for real: attribute names ("Acceleration", "Reflexes"…), tactic
+role names ("Ball-Playing Goalkeeper"), position strings ("M (C), AM (RLC)"),
+transfer value ranges ("€142M - €166M"), wages, `SearchIsFinished=False`.
+
+The remaining gap: **numeric payloads are wrapped** — `Age`, per-attribute
+`PropertyValue` (the 1–20 numbers), star ranges all come back as
+`DynamicNumber` / `DynamicReference` wrapper objects, and the bulk lists
+(`game.Search.PersonList`/`Results`, `Team.FilteredPlayers`) as `List``1` —
+and we only printed their useless `ToString`. v0.13 drills one level deeper:
+`DataType` is a *managed* `System.Type`, so we bind `As<RealType>` to get the
+correctly-typed wrapper, dump each wrapper type's API once, and invoke its
+no-arg primitive getters (lists: print count + first items).
