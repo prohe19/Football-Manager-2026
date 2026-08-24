@@ -93,9 +93,11 @@ public class ScoutUI : MonoBehaviour
     private List<MethodInfo> _tvConversions;      // static op_Implicit/op_Explicit(TypedValue) -> primitive
     private readonly Dictionary<string, MethodInfo> _tvWinners = new();  // DataType name -> bound accessor (null = known-unreadable)
 
+    private int _view;   // 0 = status, 1 = Top PA (wonderkids), 2 = Top CA
+
     private void OnGUI()
     {
-        if (_snapshots < MaxSnapshots && Time.unscaledTime >= _nextTry)
+        if (Time.unscaledTime >= _nextTry)
         {
             _nextTry = Time.unscaledTime + (_snapshots == 0 ? 3f : SnapshotInterval);
             TrySnapshot();
@@ -106,10 +108,55 @@ public class ScoutUI : MonoBehaviour
         if (!_open)
             return;
 
-        GUI.Box(new Rect(12, 48, 430, 170), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-        GUI.Label(new Rect(24, 74, 410, 22), "Stage 2 - reading REAL values from the tree");
-        GUI.Label(new Rect(24, 100, 410, 44), $"snapshots: {_snapshots}/{MaxSnapshots}   nodes: {_lastNodeCount}\n{_status}");
-        GUI.Label(new Rect(24, 150, 410, 60), "While this runs: load your save, open your SQUAD,\nopen a PLAYER PROFILE, open PLAYER SEARCH.\nEach new screen adds nodes we capture.");
+        if (GUI.Button(new Rect(170, 12, 80, 30), "Status")) _view = 0;
+        if (GUI.Button(new Rect(254, 12, 80, 30), "Top PA")) _view = 1;
+        if (GUI.Button(new Rect(338, 12, 80, 30), "Top CA")) _view = 2;
+
+        if (_view == 0)
+        {
+            GUI.Box(new Rect(12, 48, 460, 170), "FM26 Scout Mod  v" + Plugin.PluginVersion);
+            GUI.Label(new Rect(24, 74, 440, 22), $"Stage 3 - shadow scouting DB: {_rows.Count} rows captured");
+            GUI.Label(new Rect(24, 100, 440, 44), $"passes: {_snapshots}   nodes: {_lastNodeCount}\n{_status}");
+            GUI.Label(new Rect(24, 150, 440, 60), "Browse SQUADS and PLAYER SEARCH results - every row\nthe game shows is captured (name, age, CA/PA stars).\nThen open Top PA / Top CA above.");
+        }
+        else
+        {
+            DrawTopList(_view == 1);
+        }
+    }
+
+    private void DrawTopList(bool byPa)
+    {
+        var list = new List<ScoutRow>();
+        foreach (var r in _rows.Values)
+            if (r.Name != null && (byPa ? r.PaMax > 0 : r.CaMax > 0))
+                list.Add(r);
+        list.Sort((a, b) =>
+        {
+            int c = byPa ? b.PaMax.CompareTo(a.PaMax) : b.CaMax.CompareTo(a.CaMax);
+            if (c == 0) c = byPa ? b.CaMax.CompareTo(a.CaMax) : b.PaMax.CompareTo(a.PaMax);
+            return c;
+        });
+
+        int shown = Math.Min(12, list.Count);
+        GUI.Box(new Rect(12, 48, 460, 84 + shown * 20), (byPa ? "TOP POTENTIAL (wonderkids)" : "TOP CURRENT ABILITY") + $"  -  {list.Count} scouted");
+        GUI.Label(new Rect(24, 70, 440, 20), "name                          age    CA      PA");
+        for (int i = 0; i < shown; i++)
+        {
+            var r = list[i];
+            string nm = r.Name.Length > 26 ? r.Name.Substring(0, 26) : r.Name;
+            GUI.Label(new Rect(24, 92 + i * 20, 440, 20),
+                $"{i + 1,2}. {nm,-26} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-7} {Stars(r.PaMin, r.PaMax)}");
+        }
+        if (shown == 0)
+            GUI.Label(new Rect(24, 92, 440, 40), "Nothing scouted yet - browse squads / search results\nwith star-rating columns visible, then come back.");
+    }
+
+    private static string Stars(int min, int max)
+    {
+        if (max <= 0) return "-";
+        float lo = min / 4f, hi = max / 4f;
+        return min >= 0 && min != max ? $"{lo:0.#}-{hi:0.#}*" : $"{hi:0.#}*";
     }
 
     private static void L(string msg) => Plugin.Logger.LogInfo(msg);
@@ -143,7 +190,9 @@ public class ScoutUI : MonoBehaviour
             MethodInfo getPathDebug = keyType != null ? FindByName(bindingsType, "GetPathDebug", keyType) : null;
 
             _snapshots++;
-            L($"===== FM26 Scout Mod: TREE SPY pass {_snapshots}/{MaxSnapshots} (v{Plugin.PluginVersion}) — nodes={count}, new below =====");
+            bool verbose = _snapshots <= MaxSnapshots;
+            if (verbose)
+                L($"===== FM26 Scout Mod: TREE SPY pass {_snapshots}/{MaxSnapshots} (v{Plugin.PluginVersion}) — nodes={count}, new below =====");
 
             int printed = 0, added = 0, hot = 0;
             foreach (object kv in EnumerateIl2Cpp(nodes))
@@ -153,14 +202,20 @@ public class ScoutUI : MonoBehaviour
                 object node = Call(kv, kv.GetType(), "get_Value");
                 if (hashObj == null || node == null) continue;
                 ulong hash = Convert.ToUInt64(hashObj);
-                if (!_seen.Add(hash)) continue;
-                added++;
+                bool isNew = _seen.Add(hash);
+                if (isNew) added++;
 
                 Type nt = node.GetType();
                 string name = Call(node, nt, "get_Name") as string ?? "";
                 uint propId = 0;
                 object pid = Call(node, nt, "get_PropID");
                 if (pid != null) { var v = Call(pid, pid.GetType(), "get_ID"); if (v != null) propId = Convert.ToUInt32(v); }
+
+                // Scout capture runs for interesting nodes EVERY pass (the game
+                // recycles table rows, so values change under the same node).
+                bool interesting = name == "binding" || CapturedProps.Contains(propId);
+                if (!interesting && (!verbose || !isNew)) continue;
+
                 object tv = Call(node, nt, "get_Value");
                 string val = ExtractTypedValue(tv);
 
@@ -170,6 +225,11 @@ public class ScoutUI : MonoBehaviour
                     try { path = getPathDebug.Invoke(subsystem, new object[] { keyCtor.Invoke(new object[] { hash }) }) as string; }
                     catch { }
                 }
+
+                if (interesting)
+                    Capture(path, name, propId, val);
+
+                if (!verbose || !isNew) continue;
 
                 string label = KnownProps.TryGetValue(propId, out var pn) ? pn : null;
                 bool isHot = HotProps.Contains(propId)
@@ -181,17 +241,157 @@ public class ScoutUI : MonoBehaviour
                 else if (printed < MaxColdLinesPerPass) { printed++; L(line); }
             }
 
-            L($"----- pass {_snapshots}: new={added}, printed={printed}, HOT={hot} -----");
-            if (_snapshots >= MaxSnapshots)
-                LogWinnerSummary();
-            _status = _snapshots >= MaxSnapshots
-                ? "all passes done - send me LogOutput.log"
-                : $"pass {_snapshots} done ({added} new). Keep navigating screens!";
+            if (verbose)
+            {
+                L($"----- pass {_snapshots}: new={added}, printed={printed}, HOT={hot}, scoutRows={_rows.Count} -----");
+                if (_snapshots == MaxSnapshots)
+                    LogWinnerSummary();
+            }
+            else if (_snapshots % 6 == 0)
+            {
+                L($"----- scout pass {_snapshots}: rows={_rows.Count} -----");
+            }
+            _status = $"pass {_snapshots} done ({added} new). Scouted rows: {_rows.Count}";
         }
         catch (Exception ex)
         {
             Plugin.Logger.LogError($"[FM26 Scout Mod] spy #{_tries} error: {ex}");
         }
+    }
+
+    // ---------- Stage 3: shadow scouting DB ----------
+    // Every table row the game materializes (squad tables, search results)
+    // lives under a "...Items.<n>..." path with a PersonReference binding plus
+    // Age / star-range / Name cells. We group those by row and accumulate a
+    // scouted-player database that the Top PA / Top CA views sort.
+
+    private class ScoutRow
+    {
+        public string Name;
+        public int Age = -1;
+        public int CaMin = -1, CaMax = -1;
+        public int PaMin = -1, PaMax = -1;
+        public int PersonIndex = -1;
+    }
+
+    private static readonly HashSet<uint> CapturedProps = new()
+    {
+        825565216u,   // Age
+        1851878757u,  // Name
+        1970170212u,  // UniqueId
+        844321568u, 1131757922u, 1128481106u,  // CA stars / ranges (+coach)
+        1480150644u, 1349468514u, 1129333074u, // PA stars / ranges (+coach)
+    };
+
+    private readonly Dictionary<string, ScoutRow> _rows = new();
+
+    private static string RowKey(string path)
+    {
+        int i = path.IndexOf(".Items.", StringComparison.Ordinal);
+        if (i < 0) return null;
+        int start = i + 7;
+        int end = path.IndexOf('.', start);
+        return end < 0 ? path : path.Substring(0, end);
+    }
+
+    private void Capture(string path, string nodeName, uint propId, string val)
+    {
+        if (path == null || val == null) return;
+        string key = RowKey(path);
+        if (key == null) return;
+
+        if (!_rows.TryGetValue(key, out var row))
+        {
+            row = new ScoutRow();
+            _rows[key] = row;
+        }
+
+        switch (propId)
+        {
+            case 825565216u:   // Age
+                if (TryParseTagged(val, "DynamicNumber", out int age)) row.Age = age;
+                break;
+            case 844321568u: case 1131757922u: case 1128481106u:   // CA
+                if (TryParseRange(val, out int cmin, out int cmax)) { row.CaMin = cmin; row.CaMax = cmax; }
+                break;
+            case 1480150644u: case 1349468514u: case 1129333074u:  // PA
+                if (TryParseRange(val, out int pmin, out int pmax)) { row.PaMin = pmin; row.PaMax = pmax; }
+                break;
+            case 1851878757u:  // Name — rows also carry club/nation names; keep
+                               // the longest person-looking one not from a
+                               // Team/Club/Nation sub-path.
+                if (!Has(path, "Team") && !Has(path, "Club") && !Has(path, "Nation"))
+                {
+                    string n = ParseDisplayString(val);
+                    if (n != null && (row.Name == null || n.Length > row.Name.Length)) row.Name = n;
+                }
+                break;
+            case 1970170212u:  // UniqueId
+                if (TryParseTagged(val, "DynamicNumber", out int uid)) row.PersonIndex = uid;
+                break;
+        }
+
+        if (nodeName == "binding")
+        {
+            int k = val.IndexOf("get_m_index=", StringComparison.Ordinal);
+            if (k >= 0)
+            {
+                int j = k + 12, e = j;
+                while (e < val.Length && char.IsDigit(val[e])) e++;
+                if (e > j && int.TryParse(val.Substring(j, e - j), out int idx))
+                {
+                    if (row.PersonIndex > 0 && row.PersonIndex != idx)
+                    {
+                        // the game recycled this table row for another player —
+                        // start fresh instead of mixing two people's data
+                        row = new ScoutRow();
+                        _rows[key] = row;
+                    }
+                    row.PersonIndex = idx;
+                }
+            }
+        }
+    }
+
+    private static bool TryParseTagged(string v, string tag, out int n)
+    {
+        n = 0;
+        string p = "[" + tag + "] ";
+        return v.StartsWith(p, StringComparison.Ordinal) && int.TryParse(v.Substring(p.Length).Trim(), out n);
+    }
+
+    private static bool TryParseRange(string v, out int min, out int max)
+    {
+        max = FindMapInt(v, "1298233430");   // MaxValue
+        min = FindMapInt(v, "1298755158");   // MinValue
+        return max >= 0;
+    }
+
+    private static int FindMapInt(string v, string key)
+    {
+        string marker = key + "=[DynamicNumber] ";
+        int i = v.IndexOf(marker, StringComparison.Ordinal);
+        if (i < 0) return -1;
+        i += marker.Length;
+        int j = i;
+        while (j < v.Length && (char.IsDigit(v[j]) || v[j] == '-')) j++;
+        return j > i && int.TryParse(v.Substring(i, j - i), out int n) ? n : -1;
+    }
+
+    // The game styles strings as "☺<markup>☻Display Text☺" — pull the display text.
+    private static string ParseDisplayString(string v)
+    {
+        int i = v.IndexOf("[String] ", StringComparison.Ordinal);
+        if (i < 0) return null;
+        string s = v.Substring(i + 9);
+        int b = s.LastIndexOf('☻');
+        if (b >= 0)
+        {
+            int e = s.IndexOf('☺', b);
+            s = e > b ? s.Substring(b + 1, e - b - 1) : s.Substring(b + 1);
+        }
+        s = s.Trim();
+        return s.Length > 0 && s.Length < 60 ? s : null;
     }
 
     // ---------- TypedValue extraction ----------
@@ -739,7 +939,9 @@ public class ScoutUI : MonoBehaviour
 
     private static bool Has(string s, string sub) => s != null && s.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0;
     private static string SafeToString(object o) { try { return o.ToString(); } catch { return null; } }
-    private static string Trunc(string s) => s == null ? "null" : (s.Length > 140 ? s.Substring(0, 140) + "…" : s);
+    // Generous cap: styled name strings carry their display text at the END,
+    // and the scout capture parses these same strings.
+    private static string Trunc(string s) => s == null ? "null" : (s.Length > 300 ? s.Substring(0, 300) + "…" : s);
     private static object TryGet(Func<object> f) { try { return f(); } catch { return null; } }
     private static int ToInt(object o) { try { return Convert.ToInt32(o); } catch { return -1; } }
     private static T[] Safe<T>(Func<T[]> f) { try { return f() ?? Array.Empty<T>(); } catch { return Array.Empty<T>(); } }
