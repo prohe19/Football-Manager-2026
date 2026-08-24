@@ -68,6 +68,7 @@ public class ScoutUI : MonoBehaviour
         { 1886157170u, "Player" },
         { 1885696627u, "Person" },
         { 1230661448u, "PlayerIndex" },
+        { 1767075437u, "InitialSurname" },
     };
 
     // Subset of KnownProps that always deserves a "!!!" line. (Name/Search etc.
@@ -440,6 +441,7 @@ public class ScoutUI : MonoBehaviour
         public int PaMin = -1, PaMax = -1;
         public int PersonIndex = -1;
         public string IdxPath;   // node that supplied PersonIndex (recycle detection)
+        public bool IdxStrong;   // index came from the row's own binding / PlayerIndex
 
         // Best display name we have for this record.
         public string AnyName =>
@@ -454,6 +456,7 @@ public class ScoutUI : MonoBehaviour
         1718186862u,  // FirstName
         1936024430u,  // SecondName
         1230661448u,  // PlayerIndex (table row → DB person index)
+        1767075437u,  // InitialSurname (star tables' name cell)
         844321568u, 1131757922u, 1128481106u,  // CA stars / ranges (+coach)
         1480150644u, 1349468514u, 1129333074u, // PA stars / ranges (+coach)
     };
@@ -551,6 +554,15 @@ public class ScoutUI : MonoBehaviour
             case 1936024430u:  // SecondName
                 { var s2 = ParseDisplayString(val); if (s2 != null) row.SecondName = s2; }
                 break;
+            case 1767075437u:  // InitialSurname — star tables' own name cell
+                               // ("D. Essugo"); the FULL name hides inside the
+                               // styled markup's tooltip ("Click to view
+                               // Dário Cassia Luís Essugo's profile").
+                {
+                    string nm = NameFromStyled(val);
+                    if (nm != null && (row.Name == null || nm.Length > row.Name.Length)) row.Name = nm;
+                }
+                break;
             // NOTE: UniqueId (1970170212) is deliberately NOT used as the join key —
             // it may be a different numbering than PersonReference.m_index, and a
             // mixed-scheme join would merge two different people.
@@ -558,40 +570,60 @@ public class ScoutUI : MonoBehaviour
         }
 
         // Any top-level PersonReference value in a row names the row's person —
-        // not only nodes literally called "binding" (side lists may use another
-        // node name for it).
+        // EXCEPT "Human"-flavoured refs, which are always the human MANAGER
+        // (rows embed them for tooltip context; the v0.24 log showed them
+        // hijacking rows' identities). The row's own ".binding" node is the
+        // authoritative identity; anything else is a weak guess.
         if (val.StartsWith("[PersonReference]", StringComparison.Ordinal))
         {
-            int k = val.IndexOf("get_m_index=", StringComparison.Ordinal);
-            if (k >= 0)
+            bool foreign = nodeName == "Human" || nodeName == "humanteam"
+                        || path.EndsWith(".Human", StringComparison.Ordinal)
+                        || path.Contains(".Human.");
+            if (!foreign)
             {
-                int j = k + 12, e = j;
-                while (e < val.Length && char.IsDigit(val[e])) e++;
-                if (e > j && int.TryParse(val.Substring(j, e - j), out int idx))
-                    SetRowIndex(key, ref row, idx, path);
+                int k = val.IndexOf("get_m_index=", StringComparison.Ordinal);
+                if (k >= 0)
+                {
+                    int j = k + 12, e = j;
+                    while (e < val.Length && char.IsDigit(val[e])) e++;
+                    if (e > j && int.TryParse(val.Substring(j, e - j), out int idx))
+                        SetRowIndex(key, ref row, idx, path,
+                            strong: path.EndsWith(".binding", StringComparison.Ordinal));
+                }
             }
         }
         else if (propId == 1230661448u)  // PlayerIndex — DB person index as a number
         {
             if (TryParseTagged(val, "DynamicNumber", out int pidx2) && pidx2 > 0)
-                SetRowIndex(key, ref row, pidx2, path);
+                SetRowIndex(key, ref row, pidx2, path, strong: true);
         }
     }
 
-    private void SetRowIndex(string key, ref ScoutRow row, int idx, string srcPath)
+    private void SetRowIndex(string key, ref ScoutRow row, int idx, string srcPath, bool strong)
     {
         if (row.PersonIndex > 0 && row.PersonIndex != idx)
         {
-            // A DIFFERENT node than the one that set the index disagrees with it
-            // (a row can reference other people too) — keep the original source.
-            if (srcPath != row.IdxPath) return;
-            // Same node changed → the game recycled this table row for another
-            // player; start fresh instead of mixing two people's data.
-            row = new ScoutRow();
-            _rows[key] = row;
+            if (srcPath == row.IdxPath)
+            {
+                // The SAME node changed its person → the game recycled this
+                // table row for another player; start fresh instead of mixing
+                // two people's data.
+                row = new ScoutRow();
+                _rows[key] = row;
+            }
+            else if (strong && !row.IdxStrong)
+            {
+                // A strong source corrects a weak guess. Keep the row's data —
+                // it belongs to the row; only the identity label was wrong.
+            }
+            else
+            {
+                return;   // conflicting weaker/equal source — keep what we have
+            }
         }
         row.PersonIndex = idx;
-        row.IdxPath = srcPath;
+        if (strong || row.IdxPath == null) row.IdxPath = srcPath;
+        row.IdxStrong |= strong;
     }
 
     // Person-level shadow DB: rows keyed by DB person index, merged across tables.
@@ -634,6 +666,52 @@ public class ScoutUI : MonoBehaviour
         int j = i;
         while (j < v.Length && (char.IsDigit(v[j]) || v[j] == '-')) j++;
         return j > i && int.TryParse(v.Substring(i, j - i), out int n) ? n : -1;
+    }
+
+    private static bool IsB64(char c) =>
+        (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+        || c == '+' || c == '/' || c == '=';
+
+    // Name cells in star tables are styled "☺<base64 markup>☻D. Essugo☺" where
+    // the base64 tooltip text contains the person's FULL name:
+    // "…Click to view Dário Cassia Luís Essugo's profile". Prefer the full name,
+    // fall back to the display text.
+    private static string NameFromStyled(string val)
+    {
+        string disp = ParseDisplayString(val);
+        string full = null;
+        int i = val.IndexOf("[String] ", StringComparison.Ordinal);
+        if (i >= 0)
+        {
+            string s = val.Substring(i + 9).Trim();
+            int start = 0;
+            while (start < s.Length && (s[start] == '☺' || s[start] == '☻')) start++;
+            int end = start;
+            while (end < s.Length && IsB64(s[end])) end++;
+            if (end - start >= 24 && (end - start) % 4 == 0)
+            {
+                try
+                {
+                    string text = System.Text.Encoding.UTF8.GetString(
+                        Convert.FromBase64String(s.Substring(start, end - start)));
+                    int c = text.IndexOf("Click to view ", StringComparison.Ordinal);
+                    if (c >= 0)
+                    {
+                        c += 14;
+                        int d = text.IndexOf("'s profile", c, StringComparison.Ordinal);
+                        if (d > c && d - c < 60) full = text.Substring(c, d - c);
+                    }
+                }
+                catch { }
+                if (disp == null && end < s.Length)
+                {
+                    // no ☻ marker — take whatever trails the markup blob
+                    string t = s.Substring(end).Trim('☺', '☻', ' ');
+                    if (t.Length > 0 && t.Length < 60) disp = t;
+                }
+            }
+        }
+        return full ?? disp;
     }
 
     // The game styles strings as "☺<markup>☻Display Text☺" — pull the display text.

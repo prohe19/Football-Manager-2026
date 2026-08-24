@@ -355,3 +355,26 @@ v0.24 is the reconnaissance build to close that gap:
    `Bindings` class, to scope creating bindings ourselves (ask the game for
    `<person>.Name` by index — the clean endgame for names and for driving
    `game.Search`).
+
+### ✅ v0.24 X-ray results — name cell FOUND, join bug found (→ v0.25)
+
+The row X-ray answered everything at once:
+
+- **Star tables DO carry a name cell**: `InitialSurname` (propID **1767075437**),
+  a styled string — display text "D. Essugo", and the base64 tooltip markup
+  inside decodes to *"Click to view Dário Cassia Luís Essugo's profile"* —
+  i.e. the person's **full name** is embedded in every star-table row.
+- **The join hijack**: rows also embed `Human` / `humanteam` PersonReferences —
+  always the human MANAGER (idx 267375), used by the game for tooltip/context.
+  v0.24's generic capture grabbed those first and the source-path guard then
+  locked out the row's REAL person (in the row's own `.binding` node).
+- The named side-lists (`…items0.N`) are dead ends: name + shirt number only,
+  no person reference. They are no longer needed.
+- `Bindings` class API dumped: low-level plumbing (Data/Node bookkeeping,
+  HashPath, GetPathDebug) — no high-level "create binding by path" here; that
+  lives elsewhere if we ever need it. Parked.
+
+**v0.25:** capture `InitialSurname` (full name from tooltip, display text as
+fallback); exclude Human-flavoured refs from identity; source priority — the
+row's own `.binding` node and `PlayerIndex` prop are authoritative and may
+correct a weak guess, same-node changes still reset the row (recycling).
