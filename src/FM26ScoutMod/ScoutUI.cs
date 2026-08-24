@@ -94,6 +94,11 @@ public class ScoutUI : MonoBehaviour
     private readonly Dictionary<string, MethodInfo> _tvWinners = new();  // DataType name -> bound accessor (null = known-unreadable)
 
     private int _view;   // 0 = status, 1 = Top PA (wonderkids), 2 = Top CA
+    private Vector2 _panelPos = new Vector2(12, 48);
+    private float _panelH = 240;
+    private bool _dragging;
+    private Vector2 _dragOff;
+    private const float PanelW = 500;
 
     private void OnGUI()
     {
@@ -103,29 +108,63 @@ public class ScoutUI : MonoBehaviour
             TrySnapshot();
         }
 
-        if (GUI.Button(new Rect(12, 12, 150, 30), _open ? "Scout  [-]" : "Scout  [+]"))
+        Event e = Event.current;
+
+        // Hotkeys — immune to whatever the game does with the mouse.
+        if (e != null && e.type == EventType.KeyDown)
+        {
+            if (e.keyCode == KeyCode.F6) { _open = !_open; e.Use(); }
+            else if (e.keyCode == KeyCode.F7) { _open = true; _view = 0; e.Use(); }
+            else if (e.keyCode == KeyCode.F8) { _open = true; _view = 1; e.Use(); }
+            else if (e.keyCode == KeyCode.F9) { _open = true; _view = 2; e.Use(); }
+        }
+
+        if (GUI.Button(new Rect(12, 8, 170, 32), _open ? "Scout [F6] -" : "Scout [F6] +"))
             _open = !_open;
         if (!_open)
             return;
 
-        if (GUI.Button(new Rect(170, 12, 80, 30), "Status")) _view = 0;
-        if (GUI.Button(new Rect(254, 12, 80, 30), "Top PA")) _view = 1;
-        if (GUI.Button(new Rect(338, 12, 80, 30), "Top CA")) _view = 2;
+        Rect panel = new Rect(_panelPos.x, _panelPos.y, PanelW, _panelH);
+        Rect title = new Rect(panel.x, panel.y, panel.width, 26);
+
+        // Manual drag on the title bar.
+        if (e != null)
+        {
+            if (e.type == EventType.MouseDown && title.Contains(e.mousePosition))
+            { _dragging = true; _dragOff = e.mousePosition - _panelPos; e.Use(); }
+            else if (_dragging && e.type == EventType.MouseDrag)
+            { _panelPos = e.mousePosition - _dragOff; e.Use(); }
+            else if (e.type == EventType.MouseUp) _dragging = false;
+        }
+
+        GUI.Box(panel, "");
+        GUI.Box(title, $"FM26 Scout Mod v{Plugin.PluginVersion}   (drag here)   F6 hide");
+
+        float x = panel.x + 10, y = panel.y + 32;
+        if (GUI.Button(new Rect(x, y, 130, 34), _view == 0 ? "> Status <" : "Status  [F7]")) _view = 0;
+        if (GUI.Button(new Rect(x + 138, y, 130, 34), _view == 1 ? "> Top PA <" : "Top PA  [F8]")) _view = 1;
+        if (GUI.Button(new Rect(x + 276, y, 130, 34), _view == 2 ? "> Top CA <" : "Top CA  [F9]")) _view = 2;
+        y += 42;
 
         if (_view == 0)
         {
-            GUI.Box(new Rect(12, 48, 460, 170), "FM26 Scout Mod  v" + Plugin.PluginVersion);
-            GUI.Label(new Rect(24, 74, 440, 22), $"Stage 3 - shadow scouting DB: {_rows.Count} rows captured");
-            GUI.Label(new Rect(24, 100, 440, 44), $"passes: {_snapshots}   nodes: {_lastNodeCount}\n{_status}");
-            GUI.Label(new Rect(24, 150, 440, 60), "Browse SQUADS and PLAYER SEARCH results - every row\nthe game shows is captured (name, age, CA/PA stars).\nThen open Top PA / Top CA above.");
+            GUI.Label(new Rect(x, y, PanelW - 20, 22), $"Shadow scouting DB: {_rows.Count} rows captured");
+            GUI.Label(new Rect(x, y + 24, PanelW - 20, 44), $"passes: {_snapshots}   nodes: {_lastNodeCount}\n{_status}");
+            GUI.Label(new Rect(x, y + 72, PanelW - 20, 60), "Browse SQUADS and PLAYER SEARCH results - every row\nthe game shows is captured (name, age, CA/PA stars).\nThen open Top PA / Top CA (buttons or F8/F9).");
+            _panelH = y + 140 - panel.y;
         }
         else
         {
-            DrawTopList(_view == 1);
+            _panelH = DrawTopList(_view == 1, x, y, panel.y);
         }
+
+        // Swallow every remaining mouse event over the panel so it does not
+        // leak into the game UI underneath.
+        if (e != null && e.isMouse && panel.Contains(e.mousePosition))
+            e.Use();
     }
 
-    private void DrawTopList(bool byPa)
+    private float DrawTopList(bool byPa, float x, float y, float panelTop)
     {
         var list = new List<ScoutRow>();
         foreach (var r in _rows.Values)
@@ -138,18 +177,26 @@ public class ScoutUI : MonoBehaviour
             return c;
         });
 
+        GUI.Label(new Rect(x, y, PanelW - 20, 20),
+            (byPa ? "TOP POTENTIAL (wonderkids)" : "TOP CURRENT ABILITY") + $"  -  {list.Count} scouted");
+        y += 22;
+        GUI.Label(new Rect(x, y, PanelW - 20, 20), "name                              age    CA       PA");
+        y += 20;
+
         int shown = Math.Min(12, list.Count);
-        GUI.Box(new Rect(12, 48, 460, 84 + shown * 20), (byPa ? "TOP POTENTIAL (wonderkids)" : "TOP CURRENT ABILITY") + $"  -  {list.Count} scouted");
-        GUI.Label(new Rect(24, 70, 440, 20), "name                          age    CA      PA");
         for (int i = 0; i < shown; i++)
         {
             var r = list[i];
-            string nm = r.Name.Length > 26 ? r.Name.Substring(0, 26) : r.Name;
-            GUI.Label(new Rect(24, 92 + i * 20, 440, 20),
-                $"{i + 1,2}. {nm,-26} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-7} {Stars(r.PaMin, r.PaMax)}");
+            string nm = r.Name.Length > 28 ? r.Name.Substring(0, 28) : r.Name;
+            GUI.Label(new Rect(x, y + i * 20, PanelW - 20, 20),
+                $"{i + 1,2}. {nm,-28} {(r.Age > 0 ? r.Age.ToString() : "?"),3}   {Stars(r.CaMin, r.CaMax),-8} {Stars(r.PaMin, r.PaMax)}");
         }
         if (shown == 0)
-            GUI.Label(new Rect(24, 92, 440, 40), "Nothing scouted yet - browse squads / search results\nwith star-rating columns visible, then come back.");
+        {
+            GUI.Label(new Rect(x, y, PanelW - 20, 40), "Nothing scouted yet - browse squads / search results\nwith star-rating columns visible, then come back.");
+            return y + 56 - panelTop;
+        }
+        return y + shown * 20 + 12 - panelTop;
     }
 
     private static string Stars(int min, int max)
