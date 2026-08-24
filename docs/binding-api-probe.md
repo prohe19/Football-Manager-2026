@@ -421,3 +421,18 @@ CA/PA star ranges (Cole Jermaine Palmer 4.8*, Moisés Isaac Caicedo Corozo,
 Estêvão 4.5*/4.5-5*, Jamal Musiala, Warren Zaïre-Emery 3.8-4.3*/4-5* …).
 The 0x01/0x02 marker fix was the last missing piece. Stage 3's core loop —
 browse → capture → rank — is live.
+
+### v0.28 field report → v0.29 (persistence)
+
+v0.28 in-game: join rate 100% again (18/18 via Player Search rows — Gyökeres,
+Romero, Gakpo, with ages). "Filters unclickable" diagnosis: they click fine but
+matched ZERO because search-table rows carry no position cell (`cells=[]`) and
+the in-memory DB resets every restart, so a fresh session had no positions at
+all. The real fix is persistence:
+
+**v0.29:** the person DB is saved to `BepInEx/config/FM26ScoutMod.scoutdb.tsv`
+whenever it changes and loaded at startup — scouted data now accumulates
+across sessions (browse once, keep forever; values refresh when re-browsed).
+Plus F10 (cycle position filter) / F11 (U21 toggle) keyboard fallbacks, and
+the empty-list message now says how many scouted players lack position/age
+and which screens fill them in.

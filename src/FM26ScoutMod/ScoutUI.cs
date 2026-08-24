@@ -121,6 +121,11 @@ public class ScoutUI : MonoBehaviour
             else if (e.keyCode == KeyCode.F7) { _open = true; _view = 0; e.Use(); }
             else if (e.keyCode == KeyCode.F8) { _open = true; _view = 1; e.Use(); }
             else if (e.keyCode == KeyCode.F9) { _open = true; _view = 2; e.Use(); }
+            // Keyboard fallbacks for the list filters (mouse-free):
+            else if (e.keyCode == KeyCode.F10 && _open && _view != 0)
+            { _posFilter = (_posFilter + 1) % PosFilters.Length; e.Use(); }
+            else if (e.keyCode == KeyCode.F11 && _open && _view == 1)
+            { _u21Only = !_u21Only; e.Use(); }
         }
 
         if (GUI.Button(new Rect(12, 8, 170, 32), _open ? "Scout [F6] -" : "Scout [F6] +"))
@@ -152,10 +157,10 @@ public class ScoutUI : MonoBehaviour
 
         if (_view == 0)
         {
-            GUI.Label(new Rect(x, y, PanelW - 20, 22), $"Shadow scouting DB: {_rows.Count} rows / {_persons.Count} players");
-            GUI.Label(new Rect(x, y + 24, PanelW - 20, 64), $"passes: {_snapshots}   nodes: {_lastNodeCount}\n{_status}");
-            GUI.Label(new Rect(x, y + 92, PanelW - 20, 60), "Browse SQUADS and PLAYER SEARCH results - every row\nthe game shows is captured (name, age, CA/PA stars).\nThen open Top PA / Top CA (buttons or F8/F9).");
-            _panelH = y + 160 - panel.y;
+            GUI.Label(new Rect(x, y, PanelW - 20, 22), $"Scouting DB: {_persons.Count} players (saved between sessions)");
+            GUI.Label(new Rect(x, y + 24, PanelW - 20, 64), $"passes: {_snapshots}   nodes: {_lastNodeCount}   rows: {_rows.Count}\n{_status}");
+            GUI.Label(new Rect(x, y + 92, PanelW - 20, 76), "Browse SQUADS and PLAYER SEARCH results - every row the\ngame shows is captured and KEPT (name, age, pos, CA/PA).\nSquad screens fill in position + age; search fills the world.\nF8/F9 lists - F10 position filter - F11 U21 toggle.");
+            _panelH = y + 176 - panel.y;
         }
         else
         {
@@ -214,6 +219,12 @@ public class ScoutUI : MonoBehaviour
             if (r.PersonIndex <= 0 && (byPa ? r.PaMax > 0 : r.CaMax > 0))
                 list.Add(r);
 
+        int totalStarred = list.Count, noPos = 0, noAge = 0;
+        foreach (var r in list)
+        {
+            if (r.Position == null) noPos++;
+            if (r.Age <= 0) noAge++;
+        }
         list.RemoveAll(r => !MatchesPosFilter(r.Position, _posFilter)
                          || (byPa && _u21Only && (r.Age <= 0 || r.Age > 21)));
 
@@ -243,8 +254,12 @@ public class ScoutUI : MonoBehaviour
         }
         if (shown == 0)
         {
-            GUI.Label(new Rect(x, y, PanelW - 20, 56), "Nothing matches - browse squads / search results with\nstar columns visible, or relax the filters above.\n(U21 needs a known age - browse tables with an Age column.)");
-            return y + 72 - panelTop;
+            GUI.Label(new Rect(x, y, PanelW - 20, 76),
+                $"0 of {totalStarred} scouted players match the filters.\n" +
+                $"{noPos} have no position yet, {noAge} no age - the SQUAD screen\n" +
+                "(with Position/Age columns visible) fills those in; search\n" +
+                "results often lack them. Filters: F10 = position, F11 = U21.");
+            return y + 92 - panelTop;
         }
         return y + shown * 20 + 12 - panelTop;
     }
@@ -385,9 +400,11 @@ public class ScoutUI : MonoBehaviour
             // Merge rows into per-person records only after the whole pass, when
             // every recycled row has re-learned its current person index — merging
             // mid-pass could attribute a row's new values to its previous occupant.
+            if (!_dbLoaded) LoadDb();
             foreach (var r in _rows.Values)
                 if (r.PersonIndex > 0)
                     MergePerson(r);
+            if (_dbDirty) { SaveDb(); _dbDirty = false; }
 
             // Print the X-ray: the COMPLETE node list of one starred row and one
             // named row, to find where star tables keep their name cell (and
@@ -708,30 +725,81 @@ public class ScoutUI : MonoBehaviour
     // Person-level shadow DB: rows keyed by DB person index, merged across tables.
     private readonly Dictionary<int, ScoutRow> _persons = new();
 
+    // ---- persistence: the shadow DB survives game restarts ----
+    private bool _dbDirty, _dbLoaded;
+    private static string DbPath =>
+        System.IO.Path.Combine(BepInEx.Paths.ConfigPath, "FM26ScoutMod.scoutdb.tsv");
+
+    private void LoadDb()
+    {
+        _dbLoaded = true;
+        try
+        {
+            if (!System.IO.File.Exists(DbPath)) return;
+            foreach (string line in System.IO.File.ReadAllLines(DbPath))
+            {
+                string[] f = line.Split('\t');
+                if (f.Length < 9 || !int.TryParse(f[0], out int idx) || idx <= 0) continue;
+                var p = new ScoutRow { PersonIndex = idx };
+                if (f[1].Length > 0) { p.Name = f[1]; p.NameStrong = f[2] == "1"; }
+                if (int.TryParse(f[3], out int age)) p.Age = age;
+                if (f[4].Length > 0) p.Position = f[4];
+                int.TryParse(f[5], out p.CaMin); int.TryParse(f[6], out p.CaMax);
+                int.TryParse(f[7], out p.PaMin); int.TryParse(f[8], out p.PaMax);
+                _persons[idx] = p;
+            }
+            L($"scout DB loaded: {_persons.Count} players from {DbPath}");
+        }
+        catch (Exception e) { L("scout DB load failed: " + e.Message); }
+    }
+
+    private void SaveDb()
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            foreach (var kv in _persons)
+            {
+                var p = kv.Value;
+                sb.Append(kv.Key).Append('\t')
+                  .Append(p.Name ?? "").Append('\t').Append(p.NameStrong ? '1' : '0').Append('\t')
+                  .Append(p.Age).Append('\t').Append(p.Position ?? "").Append('\t')
+                  .Append(p.CaMin).Append('\t').Append(p.CaMax).Append('\t')
+                  .Append(p.PaMin).Append('\t').Append(p.PaMax).Append('\n');
+            }
+            System.IO.File.WriteAllText(DbPath, sb.ToString());
+        }
+        catch (Exception e) { L("scout DB save failed: " + e.Message); }
+    }
+
     private void MergePerson(ScoutRow row)
     {
         if (!_persons.TryGetValue(row.PersonIndex, out var p))
         {
             p = new ScoutRow { PersonIndex = row.PersonIndex };
             _persons[row.PersonIndex] = p;
+            _dbDirty = true;
         }
         string n = row.AnyName;
         if (n != null)
         {
             if (row.NameStrong)
             {
-                if (p.Name == null || !p.NameStrong || n.Length > p.Name.Length)
-                { p.Name = n; p.NameStrong = true; }
+                if (p.Name != n && (p.Name == null || !p.NameStrong || n.Length > p.Name.Length))
+                { p.Name = n; p.NameStrong = true; _dbDirty = true; }
             }
             else if (p.Name == null)
             {
                 p.Name = n;   // weak heuristic name — better than "player #N"
+                _dbDirty = true;
             }
         }
-        if (row.Age > 0) p.Age = row.Age;
-        if (row.Position != null) p.Position = row.Position;
-        if (row.CaMax > 0) { p.CaMin = row.CaMin; p.CaMax = row.CaMax; }
-        if (row.PaMax > 0) { p.PaMin = row.PaMin; p.PaMax = row.PaMax; }
+        if (row.Age > 0 && p.Age != row.Age) { p.Age = row.Age; _dbDirty = true; }
+        if (row.Position != null && p.Position != row.Position) { p.Position = row.Position; _dbDirty = true; }
+        if (row.CaMax > 0 && (p.CaMin != row.CaMin || p.CaMax != row.CaMax))
+        { p.CaMin = row.CaMin; p.CaMax = row.CaMax; _dbDirty = true; }
+        if (row.PaMax > 0 && (p.PaMin != row.PaMin || p.PaMax != row.PaMax))
+        { p.PaMin = row.PaMin; p.PaMax = row.PaMax; _dbDirty = true; }
     }
 
     private static bool TryParseTagged(string v, string tag, out int n)
