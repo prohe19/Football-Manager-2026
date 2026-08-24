@@ -372,9 +372,12 @@ public class ScoutUI : MonoBehaviour
             return ExtractTypedValue(r);
 
         // A meaningful ToString (not just a type name) wins — this is how
-        // DynamicNumber prints its number.
+        // DynamicNumber prints its number. Generic containers print their
+        // TYPE name from ToString ("System.Collections.Generic.List`1[…]"),
+        // which must not short-circuit the enumeration below.
         string s = SafeToString(r);
-        if (!string.IsNullOrEmpty(s) && s != "Il2CppSystem.Object" && s != rt.FullName && s != rt.Name)
+        if (!string.IsNullOrEmpty(s) && s != "Il2CppSystem.Object" && s != rt.FullName && s != rt.Name
+            && !s.Contains("`1[") && !s.StartsWith("System.Collections", StringComparison.Ordinal))
             return Trunc(s);
 
         // Enumerable payloads (List`1, DynamicReference's key/value map, star
