@@ -420,18 +420,30 @@ public class ScoutUI : MonoBehaviour
         return null;
     }
 
+    private static readonly Dictionary<string, Type> UnboxMap = new()
+    {
+        { "System.Boolean", typeof(bool) }, { "System.Int32", typeof(int) }, { "System.UInt32", typeof(uint) },
+        { "System.Int64", typeof(long) }, { "System.UInt64", typeof(ulong) }, { "System.Int16", typeof(short) },
+        { "System.UInt16", typeof(ushort) }, { "System.Byte", typeof(byte) }, { "System.SByte", typeof(sbyte) },
+        { "System.Single", typeof(float) }, { "System.Double", typeof(double) }, { "System.Char", typeof(char) },
+    };
+
     // Count + first entries of an il2cpp collection we could not re-type.
     // Returns null when the object has no Count (i.e. not a collection).
+    // il2cpp-reflection results come back BOXED — UpCast unboxes them.
     private string DescribeUntypedCollection(object coll, int depth)
     {
         object cnt = Il2Invoke(coll, "get_Count");
         if (cnt == null) return null;
+        cnt = UpCast(cnt);
         var sb = new StringBuilder("List(count=").Append(Trunc(SafeToString(cnt))).Append(')');
         object en = Il2Invoke(coll, "GetEnumerator");
         int i = 0;
         while (en != null && i < 5)
         {
-            if (SafeToString(Il2Invoke(en, "MoveNext")) != "True") break;
+            object mvRaw = Il2Invoke(en, "MoveNext");
+            if (mvRaw == null) break;
+            if (!(UpCast(mvRaw) is bool mv && mv)) break;
             object cur = Il2Invoke(en, "get_Current");
             sb.Append(i == 0 ? " [" : ", ").Append(cur == null ? "null" : FormatPayload(cur, "", depth + 1));
             i++;
@@ -485,6 +497,22 @@ public class ScoutUI : MonoBehaviour
             if (il2t == null) return payload;
             string fn = Call(il2t, il2t.GetType(), "get_FullName") as string;
             if (string.IsNullOrEmpty(fn)) return payload;
+
+            // Boxed il2cpp primitives (il2cpp-reflection results arrive this
+            // way) -> unbox to a managed primitive via interop's Unbox<T>.
+            if (UnboxMap.TryGetValue(fn, out var clr))
+            {
+                MethodInfo ub = null;
+                foreach (var m in payload.GetType().GetMethods())
+                    if (m.Name == "Unbox" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0) { ub = m; break; }
+                if (ub != null)
+                {
+                    object u = null;
+                    try { u = ub.MakeGenericMethod(clr).Invoke(payload, null); } catch { }
+                    if (u != null) return u;
+                }
+            }
+
             Type proxy = ResolveProxyType(fn);
             if (proxy == null) return payload;
             MethodInfo tc = null;
