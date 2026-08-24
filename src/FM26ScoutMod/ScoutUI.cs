@@ -87,6 +87,8 @@ public class ScoutUI : MonoBehaviour
     private int _lastNodeCount = -1;
     private string _status = "waiting for the binding subsystem...";
     private readonly HashSet<ulong> _seen = new();
+    private readonly HashSet<ulong> _refNodes = new();   // nodes seen holding a PersonReference
+    private bool _bindingsApiDumped;
 
     // ---- TypedValue extraction state ----
     private bool _tvApiDumped;
@@ -249,6 +251,32 @@ public class ScoutUI : MonoBehaviour
             if (verbose)
                 L($"===== FM26 Scout Mod: TREE SPY pass {_snapshots}/{MaxSnapshots} (v{Plugin.PluginVersion}) — nodes={count}, new below =====");
 
+            // One-time dump of the binding system's own API — the map for driving
+            // it directly (create bindings / run game.Search ourselves) later.
+            if (!_bindingsApiDumped)
+            {
+                _bindingsApiDumped = true;
+                try
+                {
+                    L($"===== Bindings API: {bindingsType.FullName} =====");
+                    int n = 0;
+                    foreach (var m in bindingsType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+                    {
+                        if (m.DeclaringType != bindingsType) continue;
+                        var ps = string.Join(", ", Array.ConvertAll(m.GetParameters(), p => p.ParameterType.Name + " " + p.Name));
+                        L($"    {(m.IsStatic ? "static " : "")}{m.ReturnType.Name} {m.Name}({ps})");
+                        if (++n >= 120) { L("    ...(truncated)"); break; }
+                    }
+                    L("===== end Bindings API =====");
+                }
+                catch (Exception e2) { L("Bindings API dump failed: " + e2.Message); }
+            }
+
+            // Row X-ray buffer: on verbose passes, collect every row-node line we
+            // see so we can print COMPLETE sample rows afterwards (the cold-line
+            // cap has been hiding where the name cell of star tables lives).
+            List<KeyValuePair<string, string>> xbuf = verbose ? new List<KeyValuePair<string, string>>() : null;
+
             int printed = 0, added = 0, hot = 0;
             foreach (object kv in EnumerateIl2Cpp(nodes))
             {
@@ -268,11 +296,20 @@ public class ScoutUI : MonoBehaviour
 
                 // Scout capture runs for interesting nodes EVERY pass (the game
                 // recycles table rows, so values change under the same node).
-                bool interesting = name == "binding" || CapturedProps.Contains(propId);
-                if (!interesting && (!verbose || !isNew)) continue;
+                // _refNodes: nodes that once held a PersonReference — re-read them
+                // every pass too, or a recycled row would keep its OLD person's
+                // index while capturing the NEW person's name.
+                bool interesting = name == "binding" || CapturedProps.Contains(propId) || _refNodes.Contains(hash);
+                // Process interesting nodes every pass and NEW nodes always (even
+                // after the verbose window — a fresh list needs its PersonReference
+                // discovered whenever the user first browses it); print later only
+                // while verbose.
+                if (!interesting && !isNew) continue;
 
                 object tv = Call(node, nt, "get_Value");
                 string val = ExtractTypedValue(tv);
+                if (val != null && val.StartsWith("[PersonReference]", StringComparison.Ordinal))
+                    _refNodes.Add(hash);
 
                 string path = null;
                 if (keyCtor != null && getPathDebug != null)
@@ -281,8 +318,16 @@ public class ScoutUI : MonoBehaviour
                     catch { }
                 }
 
-                if (interesting)
+                if (interesting || _refNodes.Contains(hash))
                     Capture(path, name, propId, val);
+
+                if (xbuf != null && path != null && xbuf.Count < 800)
+                {
+                    string rk = RowKey(path);
+                    if (rk != null)
+                        xbuf.Add(new KeyValuePair<string, string>(rk,
+                            $"      XRAY  name={name} propID={propId} value={Trunc(val)}  ::{path.Substring(rk.Length)}"));
+                }
 
                 if (!verbose || !isNew) continue;
 
@@ -302,6 +347,32 @@ public class ScoutUI : MonoBehaviour
             foreach (var r in _rows.Values)
                 if (r.PersonIndex > 0)
                     MergePerson(r);
+
+            // Print the X-ray: the COMPLETE node list of one starred row and one
+            // named row, to find where star tables keep their name cell (and
+            // where name lists keep their person reference).
+            if (xbuf != null && xbuf.Count > 0)
+            {
+                string starKey = null, nameKey = null;
+                foreach (var kv2 in xbuf)
+                {
+                    if (!_rows.TryGetValue(kv2.Key, out var xr)) continue;
+                    if (starKey == null && (xr.CaMax > 0 || xr.PaMax > 0)) starKey = kv2.Key;
+                    if (nameKey == null && xr.AnyName != null && xr.CaMax <= 0 && xr.PaMax <= 0) nameKey = kv2.Key;
+                }
+                foreach (string tk in new[] { starKey, nameKey })
+                {
+                    if (tk == null) continue;
+                    L($"      ===== XRAY of row {tk} =====");
+                    int shown2 = 0;
+                    foreach (var kv2 in xbuf)
+                    {
+                        if (kv2.Key != tk) continue;
+                        L(kv2.Value);
+                        if (++shown2 >= 45) { L("      XRAY ...(truncated)"); break; }
+                    }
+                }
+            }
 
             int named = 0, withCa = 0, withPa = 0;
             foreach (var r in _rows.Values)
@@ -368,6 +439,7 @@ public class ScoutUI : MonoBehaviour
         public int CaMin = -1, CaMax = -1;
         public int PaMin = -1, PaMax = -1;
         public int PersonIndex = -1;
+        public string IdxPath;   // node that supplied PersonIndex (recycle detection)
 
         // Best display name we have for this record.
         public string AnyName =>
@@ -482,13 +554,13 @@ public class ScoutUI : MonoBehaviour
             // NOTE: UniqueId (1970170212) is deliberately NOT used as the join key —
             // it may be a different numbering than PersonReference.m_index, and a
             // mixed-scheme join would merge two different people.
-            case 1230661448u:  // PlayerIndex — the row's DB person index; our join key
-                if (TryParseTagged(val, "DynamicNumber", out int pidx) && pidx > 0)
-                    SetRowIndex(key, ref row, pidx);
-                break;
+            // PlayerIndex (1230661448) is handled below, after the switch.
         }
 
-        if (nodeName == "binding")
+        // Any top-level PersonReference value in a row names the row's person —
+        // not only nodes literally called "binding" (side lists may use another
+        // node name for it).
+        if (val.StartsWith("[PersonReference]", StringComparison.Ordinal))
         {
             int k = val.IndexOf("get_m_index=", StringComparison.Ordinal);
             if (k >= 0)
@@ -496,22 +568,30 @@ public class ScoutUI : MonoBehaviour
                 int j = k + 12, e = j;
                 while (e < val.Length && char.IsDigit(val[e])) e++;
                 if (e > j && int.TryParse(val.Substring(j, e - j), out int idx))
-                    SetRowIndex(key, ref row, idx);
+                    SetRowIndex(key, ref row, idx, path);
             }
         }
-
+        else if (propId == 1230661448u)  // PlayerIndex — DB person index as a number
+        {
+            if (TryParseTagged(val, "DynamicNumber", out int pidx2) && pidx2 > 0)
+                SetRowIndex(key, ref row, pidx2, path);
+        }
     }
 
-    private void SetRowIndex(string key, ref ScoutRow row, int idx)
+    private void SetRowIndex(string key, ref ScoutRow row, int idx, string srcPath)
     {
         if (row.PersonIndex > 0 && row.PersonIndex != idx)
         {
-            // the game recycled this table row for another player —
-            // start fresh instead of mixing two people's data
+            // A DIFFERENT node than the one that set the index disagrees with it
+            // (a row can reference other people too) — keep the original source.
+            if (srcPath != row.IdxPath) return;
+            // Same node changed → the game recycled this table row for another
+            // player; start fresh instead of mixing two people's data.
             row = new ScoutRow();
             _rows[key] = row;
         }
         row.PersonIndex = idx;
+        row.IdxPath = srcPath;
     }
 
     // Person-level shadow DB: rows keyed by DB person index, merged across tables.

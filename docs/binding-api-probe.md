@@ -333,3 +333,25 @@ propID-0 `binding` nodes (harmless — we only capture star props by node propID
    name+index+stars in one record,
 4. Top PA/CA sort the person DB and show `player #<idx>` placeholders when the
    name hasn't been seen yet — the lists are never silently empty again.
+
+### v0.23 result → v0.24 plan
+
+v0.23's index join produced star+age+index records (the Top lists finally
+render — as `player #<idx>`), but **joined=0**: no record ever got a name.
+The log proved why: `FirstName`/`SecondName` nodes don't exist anywhere in
+the live tree, the named side-lists (`…items0.N`) carry no person index under
+any node we read, and star tables carry no Name-prop node.
+
+v0.24 is the reconnaissance build to close that gap:
+1. **Row X-ray** — on verbose passes, print the *complete* node list of one
+   starred row and one named row (the 120-line cold cap had been hiding the
+   name cell all along).
+2. **Generic PersonReference capture** — any row node whose value is a
+   top-level `[PersonReference]` supplies the row's index (was: only nodes
+   literally named `binding`), with a source-path guard so a second
+   person-reference in the same row can't fight the first, and re-read every
+   pass via a remembered node set so recycled rows can't keep a stale index.
+3. **Bindings API dump** — one-time reflection dump of every method on the
+   `Bindings` class, to scope creating bindings ourselves (ask the game for
+   `<person>.Name` by index — the clean endgame for names and for driving
+   `game.Search`).
