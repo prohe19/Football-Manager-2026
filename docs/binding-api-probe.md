@@ -413,3 +413,11 @@ same shape — paging through in-game search feeds the DB the whole database.
 classifies a ≥24-char leading base64 segment as markup and the next segment
 as display text; ParseDisplayString/TooltipName/NameFromStyled rebuilt on it
 (guid-like strings now yield NO display text instead of junk names).
+
+### 🎉 v0.27 CONFIRMED WORKING IN-GAME
+
+User screenshot: "TOP CURRENT ABILITY — 57 scouted" with full names, ages and
+CA/PA star ranges (Cole Jermaine Palmer 4.8*, Moisés Isaac Caicedo Corozo,
+Estêvão 4.5*/4.5-5*, Jamal Musiala, Warren Zaïre-Emery 3.8-4.3*/4-5* …).
+The 0x01/0x02 marker fix was the last missing piece. Stage 3's core loop —
+browse → capture → rank — is live.
