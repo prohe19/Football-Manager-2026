@@ -562,7 +562,7 @@ public class ScoutUI : MonoBehaviour
                 if (pageRow) break;
                 string tail = path.Length > key.Length ? path.Substring(key.Length) : "";
                 if (!Has(tail, "Team") && !Has(tail, "Club") && !Has(tail, "Nation") && !Has(tail, "Competition"))
-                    SetName(row, ParseDisplayString(val), strong: true);
+                    SetName(row, NameFromStyled(val), strong: true);
                 break;
             case 1718186862u:  // FirstName
                 { var f = ParseDisplayString(val); if (f != null) row.FirstName = f; }
@@ -717,23 +717,55 @@ public class ScoutUI : MonoBehaviour
         (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
         || c == '+' || c == '/' || c == '=';
 
-    // Styled cells embed base64 tooltip markup that often contains the person's
-    // FULL name: "…Click to view Dário Cassia Luís Essugo's profile". Extracting
-    // it is definitive — only person cells carry that tooltip.
+    // Styled game strings are "<M><base64 markup><M>Display Text<M>" where <M>
+    // is a CONTROL character (0x01/0x02 — old consoles render those as ☺☻,
+    // which is where our earlier smiley assumption came from; the literal
+    // U+263A/U+263B never matched, so display parsing silently failed).
+    private static bool IsMarker(char c) => c < ' ' || c == '☺' || c == '☻';
+
+    // Split a styled string into its base64 markup blob and its display text.
+    private static void SplitStyled(string s, out string b64, out string disp)
+    {
+        b64 = null; disp = null;
+        var segs = new List<string>();
+        int i = 0;
+        while (i < s.Length && segs.Count < 4)
+        {
+            if (IsMarker(s[i])) { i++; continue; }
+            int j = i;
+            while (j < s.Length && !IsMarker(s[j])) j++;
+            segs.Add(s.Substring(i, j - i));
+            i = j;
+        }
+        if (segs.Count == 0) return;
+        string first = segs[0];
+        bool firstIsB64 = first.Length >= 24;
+        if (firstIsB64)
+            foreach (char c in first)
+                if (!IsB64(c)) { firstIsB64 = false; break; }
+        if (firstIsB64)
+        {
+            b64 = first;
+            if (segs.Count > 1) disp = segs[1].Trim();
+        }
+        else
+        {
+            disp = first.Trim();
+        }
+    }
+
+    // The base64 tooltip markup often contains the person's FULL name:
+    // "…Click to view Jorrel Evan Hato's profile". Extracting it is
+    // definitive — only person cells carry that tooltip.
     private static string TooltipName(string val)
     {
         int i = val.IndexOf("[String] ", StringComparison.Ordinal);
         if (i < 0) return null;
-        string s = val.Substring(i + 9).Trim();
-        int start = 0;
-        while (start < s.Length && (s[start] == '☺' || s[start] == '☻')) start++;
-        int end = start;
-        while (end < s.Length && IsB64(s[end])) end++;
-        if (end - start < 24 || (end - start) % 4 != 0) return null;
+        SplitStyled(val.Substring(i + 9), out string b64, out _);
+        if (b64 == null || b64.Length % 4 != 0) return null;
         try
         {
-            string text = System.Text.Encoding.UTF8.GetString(
-                Convert.FromBase64String(s.Substring(start, end - start)));
+            string text = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(b64));
             int c = text.IndexOf("Click to view ", StringComparison.Ordinal);
             if (c >= 0)
             {
@@ -746,27 +778,10 @@ public class ScoutUI : MonoBehaviour
         return null;
     }
 
-    // Name cell markup + display fallback ("D. Essugo").
+    // Full name from tooltip markup, display text ("J. Hato") as fallback.
     private static string NameFromStyled(string val)
     {
-        string full = TooltipName(val);
-        if (full != null) return full;
-        string disp = ParseDisplayString(val);
-        if (disp != null) return disp;
-        // no ☻ marker — take whatever trails the base64 blob
-        int i = val.IndexOf("[String] ", StringComparison.Ordinal);
-        if (i < 0) return null;
-        string s = val.Substring(i + 9).Trim();
-        int start = 0;
-        while (start < s.Length && (s[start] == '☺' || s[start] == '☻')) start++;
-        int end = start;
-        while (end < s.Length && IsB64(s[end])) end++;
-        if (end - start >= 24 && end < s.Length)
-        {
-            string t = s.Substring(end).Trim('☺', '☻', ' ');
-            if (t.Length > 0 && t.Length < 60) return t;
-        }
-        return null;
+        return TooltipName(val) ?? ParseDisplayString(val);
     }
 
     // Plain-string cell heuristic: could this be a person's name? Rejects
@@ -785,20 +800,13 @@ public class ScoutUI : MonoBehaviour
         return lower;
     }
 
-    // The game styles strings as "☺<markup>☻Display Text☺" — pull the display text.
+    // Pull the display text out of a (possibly styled) game string.
     private static string ParseDisplayString(string v)
     {
         int i = v.IndexOf("[String] ", StringComparison.Ordinal);
         if (i < 0) return null;
-        string s = v.Substring(i + 9);
-        int b = s.LastIndexOf('☻');
-        if (b >= 0)
-        {
-            int e = s.IndexOf('☺', b);
-            s = e > b ? s.Substring(b + 1, e - b - 1) : s.Substring(b + 1);
-        }
-        s = s.Trim();
-        return s.Length > 0 && s.Length < 60 ? s : null;
+        SplitStyled(v.Substring(i + 9), out _, out string disp);
+        return disp != null && disp.Length > 0 && disp.Length < 60 ? disp : null;
     }
 
     // ---------- TypedValue extraction ----------

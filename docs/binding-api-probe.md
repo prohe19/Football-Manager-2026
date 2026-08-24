@@ -396,3 +396,20 @@ is a weak fallback; (2) every string cell is remembered per row and printed in
 the starred-row diagnostics (`cells=[…]`), so the next log shows exactly what
 each column holds; (3) name strength tracked end-to-end (weak names never
 overwrite tooltip/prop names).
+
+### ✅ v0.26 X-ray — THE name bug found: marker chars are 0x01/0x02, not ☺☻
+
+The squad playertable row X-ray showed the name node was there all along —
+`Items.N.2.6.binding.Name` (propID 1851878757), styled string with display
+"Jorrel Hato" and full name in the tooltip markup ("Click to view Jorrel
+Evan Hato's profile") — captured every pass, then thrown away: styled-string
+markers are CONTROL characters (0x01/0x02). Old consoles render those as ☺☻,
+which is where the earlier "☺…☻" assumption came from; the literal
+U+263A/U+263B never matched, display parsing failed, and the >60-char blob
+was rejected. Search-result rows (playertable2 under PlayerSearch) have the
+same shape — paging through in-game search feeds the DB the whole database.
+
+**v0.27:** SplitStyled() treats any char < 0x20 (plus real ☺☻) as marker,
+classifies a ≥24-char leading base64 segment as markup and the next segment
+as display text; ParseDisplayString/TooltipName/NameFromStyled rebuilt on it
+(guid-like strings now yield NO display text instead of junk names).
